@@ -313,18 +313,46 @@ export async function parseCurrentUrlFull(href: string): Promise<SiteInfo | null
     if (!base) return null;
 
     if (base.platform === 'axiom') {
-      const res = await call({
-        type: 'thirdParty:getTokenInfo',
-        platform: 'axiom',
-        chain: base.chain,
-        address: base.tokenAddress,
-      } as const);
-      const tokenInfo = res.tokenInfo;
-      if (!tokenInfo) return null;
-      return {
-        ...base,
-        tokenAddress: tokenInfo.address,
-      };
+      if (base.chain !== 'sol') {
+        // bnb: keep original AxiomAPI third-party lookup, but fall back to base instead of null (no flicker)
+        const res = await call({
+          type: 'thirdParty:getTokenInfo',
+          platform: 'axiom',
+          chain: base.chain,
+          address: base.tokenAddress,
+        } as const);
+        const tokenInfo = res.tokenInfo;
+        if (!tokenInfo) {
+          console.warn('Dagobang: axiom bnb token info unavailable, fallback to URL address', base);
+          return base;
+        }
+        return {
+          ...base,
+          tokenAddress: tokenInfo.address,
+        };
+      }
+      // sol: fiber-extracted mint takes priority (page already has data, zero network requests)
+      const axiomPair = (typeof window !== 'undefined'
+        ? (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__
+        : null) as unknown;
+      const urlAddr = base.tokenAddress;
+      const isPairObj = (v: unknown): v is { pairAddress: unknown; tokenAddress: unknown } =>
+        !!v && typeof v === 'object' && 'pairAddress' in v && 'tokenAddress' in v;
+      const extractedMint = isPairObj(axiomPair)
+        && axiomPair.pairAddress === urlAddr
+        && typeof axiomPair.tokenAddress === 'string'
+        ? axiomPair.tokenAddress
+        : null;
+      if (extractedMint) {
+        return { ...base, tokenAddress: extractedMint };
+      }
+      // Extraction unavailable (mint-type URL / challenge page): gmgn API fills in — same pattern as xxyy/dexscreener branch
+      const tokenInfo = await TokenAPI.getTokenInfo('gmgn', base.chain, urlAddr).catch(() => null);
+      if (tokenInfo?.address) {
+        return { ...base, tokenAddress: tokenInfo.address };
+      }
+      console.warn('Dagobang: axiom token resolve unavailable, fallback to URL address', base);
+      return base;   // flicker fix: was return null
     }
 
     if (base.platform === 'xxyy' || base.platform === 'dexscreener') {

@@ -105,6 +105,7 @@ export default defineContentScript({
       installUrlChangeEmitter();
       installNavigateListener();
       installGmgnApiBridge();
+      installAxiomTokenExtractor();
 
       const host = window.location.hostname;
       if (!shouldMonitorWsOnHost(host)) return;
@@ -267,6 +268,97 @@ export default defineContentScript({
       window.addEventListener('popstate', dispatchUrlChange);
       window.addEventListener('hashchange', dispatchUrlChange);
       dispatchUrlChange();
+    }
+
+    function installAxiomTokenExtractor() {
+      type AxiomPairInfo = {
+        tokenAddress: string;
+        tokenName?: string;
+        tokenTicker?: string;
+        pairAddress: string;
+        [key: string]: unknown;
+      };
+      const host = window.location.hostname;
+      if (!host.includes('axiom.trade')) return;
+      const scanOnce = (): boolean => {
+        try {
+          const root = document.documentElement;
+          const fiberKey = Object.keys(root).find((k) => k.startsWith('__reactFiber$'));
+          if (!fiberKey) return false;
+          const seen = new Set<unknown>();
+          const walk = (f: unknown): AxiomPairInfo | null => {
+            if (!f || seen.has(f) || seen.size > 5000) return null;
+            seen.add(f);
+            try {
+              const p: unknown = (f as { memoizedProps?: unknown }).memoizedProps;
+              const hasPair = (obj: unknown): boolean =>
+                !!obj && typeof obj === 'object' && 'pair' in obj
+                  ? (() => { const inner: unknown = (obj as { pair: unknown }).pair; return !!inner && typeof inner === 'object' && 'tokenAddress' in inner && typeof (inner as { tokenAddress: unknown }).tokenAddress === 'string'; })()
+                  : false;
+              const hasFlatPair = (obj: unknown): boolean =>
+                !!obj && typeof obj === 'object' && 'tokenAddress' in obj && 'pairAddress' in obj
+                  && typeof (obj as { tokenAddress: unknown }).tokenAddress === 'string'
+                  && typeof (obj as { pairAddress: unknown }).pairAddress === 'string';
+              if (hasPair(p)) {
+                return (p as { pair: AxiomPairInfo }).pair;
+              }
+              if (hasFlatPair(p)) {
+                const typed = p as AxiomPairInfo;
+                return { tokenAddress: typed.tokenAddress, tokenName: typed.tokenName, tokenTicker: typed.tokenTicker, pairAddress: typed.pairAddress };
+              }
+            } catch { }
+            const node = f as { child?: unknown; sibling?: unknown };
+            return walk(node.child) ?? walk(node.sibling);
+          };
+          const pair = walk((root as unknown as Record<string, unknown>)[fiberKey]);
+          // The React tree also carries OTHER tokens' pairs (watchlists, trending lists).
+          // Only accept the pair that matches the current /meme/<pairAddress> URL.
+          const urlSegment = window.location.pathname.split('/').filter(Boolean).pop() || '';
+          if (!pair || !urlSegment) return false;
+          if (String(pair.pairAddress).toLowerCase() !== urlSegment.toLowerCase()) return false;
+          const key = pair.pairAddress + ':' + pair.tokenAddress;
+          const g = window as unknown as { __DAGOBANG_LAST_AXIOM_PAIR__?: string };
+          if (g.__DAGOBANG_LAST_AXIOM_PAIR__ !== key) {
+            g.__DAGOBANG_LAST_AXIOM_PAIR__ = key;
+          }
+          // Always post — dedup only guards against duplicate scans, not reposts
+          // (the isolated-world consumer may not be listening yet).
+          window.postMessage({ type: 'DAGOBANG_AXIOM_PAIR', pair, ts: Date.now() }, '*');
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      // React renders after load: retry until found. axiom pages can take >10s to
+      // render pair data on cold loads, so keep scanning (500ms) until the first hit —
+      // no fixed retry cap. After a hit, keep re-posting the cached pair for a while:
+      // the isolated-world consumer may register its message listener later than the
+      // first post (content script mounts after this MAIN-world bridge).
+      let found = false;
+      let replayUntil = 0;
+      const dispatch = () => {
+        const tick = () => {
+          // Only keep scanning on /meme/ pages; other axiom pages never carry pair data.
+          if (!window.location.pathname.includes('/meme/')) return;
+          if (scanOnce()) {
+            found = true;
+            replayUntil = Date.now() + 5 * 60 * 1000;
+            return;
+          }
+          if (!found) window.setTimeout(tick, 500);
+        };
+        window.setTimeout(tick, 50);
+      };
+      window.setInterval(() => {
+        if (replayUntil > Date.now()) dispatch();
+      }, 2000);
+      window.addEventListener('message', (e: MessageEvent) => {
+        if (e.source !== window) return;
+        const d: unknown = e.data;
+        if (d && typeof d === 'object' && 'type' in d && (d as { type: unknown }).type === 'DAGOBANG_URL_CHANGE') dispatch();
+      });
+      window.addEventListener('popstate', dispatch);
+      dispatch();
     }
 
     function installNavigateListener() {

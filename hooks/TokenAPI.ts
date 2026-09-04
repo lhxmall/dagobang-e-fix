@@ -1,4 +1,5 @@
 import GmgnAPI from "./GmgnAPI";
+import AxiomAPI from './AxiomAPI';
 import DexScreenerAPI, { DexScreenerPair } from "./DexScreenerAPI";
 import { FlapTokenStateV7, FourmemeTokenInfo, TokenInfo } from "@/types/token";
 import { call } from "@/utils/messaging";
@@ -362,6 +363,77 @@ export class TokenAPI {
         };
     }
 
+    /**
+     * Build axiom+sol tokenInfo directly from the fiber-extracted pair-info object
+     * (the page already holds the full API response in its React tree — zero network).
+     * Only used when the stored object matches the current token context.
+     */
+    private static buildAxiomSolTokenInfoFromPagePair(tokenAddress: string): TokenInfo | null {
+        if (typeof window === 'undefined') return null;
+        const stored = (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__;
+        if (!stored || typeof stored !== 'object') return null;
+        const pair = stored as Record<string, unknown>;
+        const mint = typeof pair.tokenAddress === 'string' ? pair.tokenAddress : '';
+        if (!mint || mint.toLowerCase() !== tokenAddress.toLowerCase()) return null;
+        const pairAddress = typeof pair.pairAddress === 'string' ? pair.pairAddress : '';
+        if (!pairAddress) return null;
+        const protocol = typeof pair.protocol === 'string' ? pair.protocol
+            : (typeof pair.displayProtocol === 'string' ? pair.displayProtocol : '');
+        const extra = (pair.extra && typeof pair.extra === 'object' ? pair.extra : {}) as Record<string, unknown>;
+        const migrated = !!(extra.migratedFrom || extra.migratedTo);
+        const ticker = typeof pair.tokenTicker === 'string' ? pair.tokenTicker : '';
+        const name = typeof pair.tokenName === 'string' ? pair.tokenName : '';
+        if (!ticker && !name) return null;
+        const decimals = Number(pair.tokenDecimals);
+        const launchpad = TokenAPI.mapAxiomSolProtocolToLaunchpad(protocol, migrated);
+        return {
+            chain: 'sol',
+            address: mint,
+            name: name || ticker,
+            symbol: ticker || name,
+            decimals: Number.isFinite(decimals) && decimals >= 0 && decimals <= 36 ? decimals : 6,
+            logo: typeof pair.tokenImage === 'string' ? pair.tokenImage : '',
+            launchpad,
+            launchpad_progress: 0,
+            launchpad_platform: launchpad,
+            launchpad_status: migrated ? 1 : 0,
+            quote_token: 'SOL',
+            quote_token_address: '',
+            pool_pair: pairAddress,
+            biggest_pool_address: pairAddress,
+            website: typeof pair.website === 'string' ? pair.website : undefined,
+            twitterUrl: typeof pair.twitter === 'string' ? pair.twitter : undefined,
+            telegramUrl: typeof pair.telegram === 'string' ? pair.telegram : undefined,
+            discordUrl: typeof pair.discord === 'string' ? pair.discord : undefined,
+        };
+    }
+
+    /** Map axiom protocol labels to launchpad identifiers understood by the router. */
+    private static mapAxiomSolProtocolToLaunchpad(protocol: string, migrated: boolean): string {
+        const p = protocol.toLowerCase();
+        if (p.includes('pump')) return migrated ? 'pumpswap' : 'pumpfun';
+        if (p.includes('raydium')) return 'raydium';
+        if (p.includes('meteora')) return 'meteora';
+        if (p.includes('virtual') || p.includes('believe')) return 'believe';
+        return '';
+    }
+
+    /**
+     * Resolve the address to feed axiom's pair-info API: the pair address when the
+     * page context knows it (URL segment is the pair), otherwise the mint as-is.
+     */
+    private static resolveAxiomSolPairAddress(tokenAddress: string): string {
+        if (typeof window === 'undefined') return tokenAddress;
+        const stored = (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__;
+        if (stored && typeof stored === 'object') {
+            const pair = stored as Record<string, unknown>;
+            if (typeof pair.pairAddress === 'string' && pair.pairAddress) {
+                return pair.pairAddress;
+            }
+        }
+        return tokenAddress;
+    }
+
     static async getTokenInfo(
         platform: string,
         chain: string,
@@ -430,17 +502,43 @@ export class TokenAPI {
                     : null;
                 if (platform === 'gmgn' || platform === 'axiom') {
                     try {
-                        const tokenInfo = platform === 'gmgn'
-                            ? await GmgnAPI.getTokenInfo(chain, address)
-                            : (await call({
-                                type: 'thirdParty:getTokenInfo',
-                                platform,
-                                chain,
-                                address,
-                            } as const)).tokenInfo;
+                        const chainIdForSource = getChainIdByName(chain);
+                        const isAxiomSol = platform === 'axiom' && chainIdForSource === ChainId.SOL;
+                        // axiom+sol data source priority:
+                        // 1. fiber-extracted page data (the pair-info API response already in
+                        //    the page's React tree — zero network, authoritative, matches URL)
+                        // 2. axiom's own pair-info API (needs the PAIR address; on axiom pages
+                        //    it is same-site with cookies; from the SW there is no CORS)
+                        // 3. gmgn mirror via the SW channel (host_permissions, no CORS)
+                        const onGmgnOrigin = typeof window !== 'undefined'
+                            && String(window.location?.hostname || '').includes('gmgn.ai');
+                        const tokenInfo = isAxiomSol
+                            ? (this.buildAxiomSolTokenInfoFromPagePair(address)
+                                ?? await AxiomAPI.getTokenInfo(chain, this.resolveAxiomSolPairAddress(address))
+                                ?? (await call({
+                                    type: 'thirdParty:getTokenInfo',
+                                    platform: 'gmgn',
+                                    chain,
+                                    address,
+                                } as const)).tokenInfo)
+                            : (platform === 'gmgn'
+                                ? (onGmgnOrigin
+                                    ? await GmgnAPI.getTokenInfo(chain, address)
+                                    : (await call({
+                                        type: 'thirdParty:getTokenInfo',
+                                        platform: 'gmgn',
+                                        chain,
+                                        address,
+                                    } as const)).tokenInfo)
+                                : (await call({
+                                    type: 'thirdParty:getTokenInfo',
+                                    platform,
+                                    chain,
+                                    address,
+                                } as const)).tokenInfo);
                         if (tokenInfo) {
                             const chainId = getChainIdByName(chain);
-                            if (platform === 'gmgn' && chainId === ChainId.SOL) {
+                            if ((platform === 'gmgn' || platform === 'axiom') && chainId === ChainId.SOL) {
                                 nextValue = tokenInfo;
                             } else {
                             const normalizedLaunchpad = resolveTokenLaunchpadPlatform({

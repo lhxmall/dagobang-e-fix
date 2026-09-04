@@ -37,5 +37,18 @@ export default defineContentScript({
     }
 
     setupQuickBuyButtonsForCurrentSite();
+
+    window.addEventListener('message', (e: MessageEvent) => {
+      if (e.source !== window) return;
+      const data: unknown = e.data;
+      if (!data || typeof data !== 'object' || !('type' in data)) return;
+      const typed = data as { type: unknown; pair?: unknown };
+      if (typed.type !== 'DAGOBANG_AXIOM_PAIR') return;
+      const pair = typed.pair;
+      if (!pair || typeof pair !== 'object' || !('tokenAddress' in pair)) return;
+      const candidate = pair as { tokenAddress: unknown };
+      if (typeof candidate.tokenAddress !== 'string') return;
+      (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__ = pair;
+    });
   },
 });

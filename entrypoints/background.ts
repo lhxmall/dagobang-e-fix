@@ -41,6 +41,7 @@ import { SolanaRpcService } from '@/services/chain/solana/rpc';
 import type { ChainTxId } from '@/types/chain';
 import AxiomAPI from '@/hooks/AxiomAPI';
 import FlapAPI from '@/hooks/FlapAPI';
+import GmgnAPI from '@/hooks/GmgnAPI';
 import { resolveMigratedSolanaTokenInfo, shouldTryRefreshMigratedSolanaTokenInfo } from '@/services/limitOrders/solanaTokenInfoRefresh';
 import { SolanaBroadcastService } from '@/services/chain/solana/broadcast';
 import { ensureSolanaTradePrewarm, scheduleSolanaTradePrewarm } from '@/services/chain/solana/trade/prewarmScheduler';
@@ -2001,6 +2002,9 @@ export default defineBackground(() => {
             let tokenInfo = null;
             if (platform === 'axiom') {
               tokenInfo = await AxiomAPI.getTokenInfo(msg.chain, msg.address);
+            } else if (platform === 'gmgn') {
+              // SW-side fetch: no CORS (host_permissions), unlike content scripts on other origins.
+              tokenInfo = await GmgnAPI.getTokenInfo(String(msg.chain || ''), String(msg.address || ''));
             } else if (platform === 'flap') {
               tokenInfo = await FlapAPI.getTokenInfo(msg.chain, msg.address);
             }

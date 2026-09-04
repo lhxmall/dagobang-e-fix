@@ -43,8 +43,27 @@ export interface AxiomPairInfoResponse {
   };
 }
 
+// Solana pair-info response (flat shape, v=2 endpoint)
+interface AxiomSolPairInfoResponse {
+  tokenAddress?: string;
+  tokenName?: string;
+  tokenTicker?: string;
+  tokenDecimals?: number;
+  tokenImage?: string;
+  pairAddress?: string;
+  protocol?: string;
+  displayProtocol?: string;
+  website?: string | null;
+  twitter?: string | null;
+  telegram?: string | null;
+  discord?: string | null;
+  supply?: number;
+  extra?: { migratedFrom?: string | null; migratedTo?: string | null } | null;
+}
+
 export class AxiomAPI {
   private static readonly BASE_URL_BNB = 'https://api2-bnb.axiom.trade';
+  private static readonly BASE_URL_SOL = 'https://api10.axiom.trade';
 
   /**
    * Make HTTP request using fetch API with proper headers
@@ -115,8 +134,11 @@ export class AxiomAPI {
    * @param address Token address
    */
   public static async getTokenInfo(chain: string, address: string): Promise<TokenInfo | null> {
-    // Currently only supporting BSC/BNB based on provided examples
-    if (chain.toLowerCase() !== 'bsc' && chain.toLowerCase() !== 'bnb') {
+    const chainLower = chain.toLowerCase();
+    if (chainLower === 'sol') {
+      return this.getSolTokenInfo(address);
+    }
+    if (chainLower !== 'bsc' && chainLower !== 'bnb') {
       console.warn(`AxiomAPI: Chain ${chain} not supported`);
       return null;
     }
@@ -170,6 +192,63 @@ export class AxiomAPI {
       // Fallback or rethrow depending on requirements. For now, returning null to be safe.
       return null;
     }
+  }
+
+  /**
+   * Solana token info via axiom's own pair-info API.
+   * Same-site on axiom pages (cookies flow) and usable from the SW (host_permissions, no CORS).
+   */
+  private static async getSolTokenInfo(pairAddress: string): Promise<TokenInfo | null> {
+    const url = `${this.BASE_URL_SOL}/pair-info?pairAddress=${encodeURIComponent(pairAddress)}&v=2`;
+    try {
+      const response = await this.makeRequest(url, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const data = await response.json() as AxiomSolPairInfoResponse;
+      if (!data || !data.tokenAddress) {
+        return null;
+      }
+      const protocol = String(data.protocol || data.displayProtocol || '').trim();
+      const migrated = !!(data.extra?.migratedFrom || data.extra?.migratedTo);
+      const launchpad = this.mapSolProtocolToLaunchpad(protocol, migrated);
+      if (!data.tokenName && !data.tokenTicker) return null;
+      return {
+        chain: 'sol',
+        address: data.tokenAddress,
+        name: data.tokenName || data.tokenTicker || '',
+        symbol: data.tokenTicker || data.tokenName || '',
+        decimals: Number.isFinite(Number(data.tokenDecimals)) ? Number(data.tokenDecimals) : 6,
+        logo: data.tokenImage || '',
+        launchpad,
+        launchpad_progress: 0,
+        launchpad_platform: launchpad,
+        launchpad_status: migrated ? 1 : 0,
+        quote_token: 'SOL',
+        quote_token_address: '',
+        pool_pair: data.pairAddress || pairAddress,
+        website: data.website || undefined,
+        twitterUrl: data.twitter || undefined,
+        telegramUrl: data.telegram || undefined,
+        discordUrl: data.discord || undefined,
+      };
+    } catch (error) {
+      console.error('Failed to fetch token info from Axiom (sol):', error);
+      return null;
+    }
+  }
+
+  /** Map axiom protocol labels to launchpad identifiers understood by the router. */
+  private static mapSolProtocolToLaunchpad(protocol: string, migrated: boolean): string {
+    const p = protocol.toLowerCase();
+    if (p.includes('pump')) return migrated ? 'pumpswap' : 'pumpfun';
+    if (p.includes('raydium')) return 'raydium';
+    if (p.includes('meteora')) return 'meteora';
+    if (p.includes('virtual') || p.includes('believe')) return 'believe';
+    return '';
   }
 }
 
