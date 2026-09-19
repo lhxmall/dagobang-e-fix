@@ -139,3 +139,6 @@ dist
 *.pem
 .output
 .dbg
+
+# wxt generated (recreated by `wxt prepare` / `wxt dev`)
+.wxt
