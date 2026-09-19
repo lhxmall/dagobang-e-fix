@@ -354,7 +354,7 @@ export function SellSection({
         </div>
         <div className={`flex items-center gap-1 text-zinc-300 ${isAltfunLayout ? 'text-[16px]' : 'text-[14px]'}`}>
           <span>{formattedTokenBalance}</span>
-          <span className={`text-amber-500 ${isAltfunLayout ? 'text-[13px]' : 'text-[12px]'}`}>{tokenSymbol || t('contentUi.common.token', locale)}</span>
+          <span className={`text-amber-500 ${isAltfunLayout ? 'text-[13px]' : 'text-[12px]'}`}>{tokenSymbol || ''}</span>
         </div>
       </div>
 
@@ -404,7 +404,7 @@ export function SellSection({
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 truncate">
             <span className="text-zinc-200">
-              {activePreviewPct != null ? `${formatAmount(activePreviewPct)}% ${tokenSymbol || t('contentUi.common.token', locale)}` : '--'}
+              {activePreviewPct != null ? `${formatAmount(activePreviewPct)}% ${tokenSymbol || ''}`.trim() : '--'}
             </span>
             <span className="ml-1 text-zinc-500">
               ≈ {formatUsd(activePreviewUsd)}

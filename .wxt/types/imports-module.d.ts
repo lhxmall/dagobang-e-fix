@@ -20,7 +20,7 @@ declare module '#imports' {
   export { fakeBrowser } from 'wxt/testing';
   export { BNBCoinIcon, ETHCoinIcon, HYPECoinIcon, SOLCoinIcon, USDCCoinIcon, ChainCoinIcon, SymbolCoinIcon } from '../components/Coins';
   export { Logo } from '../components/Logo';
-  export { default as AxiomAPI, AxiomAPI, AxiomPairInfoResponse } from '../hooks/AxiomAPI';
+  export { default as AxiomAPI, AxiomAPI, AxiomPairInfoResponse, AxiomPairPayload } from '../hooks/AxiomAPI';
   export { default as DexScreenerAPI, DexScreenerAPI, DexScreenerTokenRef, DexScreenerPair } from '../hooks/DexScreenerAPI';
   export { default as FlapAPI, FlapAPI, FlapCoinApiResponse } from '../hooks/FlapAPI';
   export { default as GmgnAPI, extractGmgnAuthData, GmgnAPI, MultiTokenInfoResponse, GmgnSearchTokenItem, FlapQuoteSupportResult, GmgnTokenPoolFeeInfo, GmgnTokenHolding, GmgnPageFetchRequest, TokenCandle, TokenCandlesResponse, ApiUrlParams, SwapOrderRequest, SwapOrderResponse, BuyOrderParams, SellOrderParams, TokenCandlesParams, DailyProfit, DailyProfitResponse, DailyProfitParams, TokenHoldingDetail, TokenHoldingDetailResponse } from '../hooks/GmgnAPI';
@@ -29,7 +29,7 @@ declare module '#imports' {
   export { useTradeSuccessSound } from '../hooks/useTradeSuccessSound';
   export { COOKING_LAST_LAUNCH_STORAGE_KEY, COOKING_LAST_LAUNCH_EVENT, readCookingLastLaunch, rememberCookingLastLaunch, clearCookingLastLaunch, CookingLastLaunch } from '../utils/cookingLaunchWallets';
   export { encryptJson, decryptJson } from '../utils/crypto';
-  export { defaultSettings } from '../utils/defaults';
+  export { AUTO_LOCK_SECONDS_MIN, AUTO_LOCK_SECONDS_MAX, defaultSettings } from '../utils/defaults';
   export { getDexPoolPrefer, parseGweiToWei } from '../utils/dexUtils';
   export { isFlapPortalOrManagerAddress, isUsableFlapDexPoolAddress, hasConfirmedFlapStocksIdentity, hasConfirmedFlapOuterRoute, normalizeFlapLaunchpadStatus, hasNonTerminalFlapOuterQuote, resolveFlapPlatform, hasConfirmedFlapLaunchpadIdentity, resolveFlapPlatformByQuoteLineage, classifyFlapRoute } from '../utils/flap';
   export { normalizeHexPrivateKey, isHexPrivateKey, parseNumberLoose, normalizePriceValue, formatPriceValue, formatTime, formatAgeShort, formatCountShort, formatCompactNumber, formatBnbAmount, formatShortAddress, formatBroadcastProvider, formatRpcEndpointLabel } from '../utils/format';

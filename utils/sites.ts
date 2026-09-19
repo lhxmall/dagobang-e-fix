@@ -1,9 +1,8 @@
 import { SiteInfo } from "#imports";
-import { getChainIdByName, normalizeChainName, toDexScreenerChainName, toGmgnChainName } from "@/constants/chains";
+import { getChainIdByName, isSupportedChainName, normalizeChainName, toAxiomChainName, toDexScreenerChainName, toGmgnChainName } from "@/constants/chains";
 import { MEME_SUFFIXS } from "@/constants/meme";
 import { getBridgeTokenAddresses } from "@/constants/tokens";
 import { TokenAPI } from '@/hooks/TokenAPI';
-import { call } from '@/utils/messaging';
 
 export interface SiteInfo {
   chain: string;
@@ -19,7 +18,7 @@ export function parsePlatformTokenLink(siteInfo: SiteInfo, tokenAddress: string)
     case 'gmgn':
       return `https://gmgn.ai/${toGmgnChainName(siteInfo.chain)}/token/${tokenAddress}`;
     case 'axiom':
-      return `https://axiom.trade/meme/${tokenAddress}?chain=${siteInfo.chain == 'bsc' ? 'bnb' : siteInfo.chain}`;
+      return `https://axiom.trade/meme/${tokenAddress}?chain=${toAxiomChainName(siteInfo.chain)}`;
     case 'binance':
       return `https://web3.binance.com/zh-CN/token/${siteInfo.chain}/${tokenAddress}`;
     case 'okx':
@@ -87,6 +86,31 @@ function toSiteChain(raw: string | null | undefined, fallback = ''): string {
   return normalizeChainName(raw ?? '') || fallback;
 }
 
+function isLikelySolanaAddress(addr: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
+}
+
+function isLikelyEvmAddress(addr: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(addr);
+}
+
+let lastAxiomChain = '';
+
+function rememberAxiomChain(chain: string): string {
+  if (chain && isSupportedChainName(chain)) lastAxiomChain = chain;
+  return chain;
+}
+
+function resolveAxiomChainFromUrl(u: URL, tokenAddress = ''): string {
+  const fromQuery = toSiteChain(u.searchParams.get('chain') || u.searchParams.get('chainId'));
+  if (fromQuery && isSupportedChainName(fromQuery)) return rememberAxiomChain(fromQuery);
+  if (tokenAddress && isLikelySolanaAddress(tokenAddress) && !isLikelyEvmAddress(tokenAddress)) {
+    return rememberAxiomChain('sol');
+  }
+  if (lastAxiomChain && isSupportedChainName(lastAxiomChain)) return lastAxiomChain;
+  return '';
+}
+
 export function parseCurrentUrl(href: string): SiteInfo | null {
   try {
     const u = new URL(href);
@@ -125,23 +149,25 @@ export function parseCurrentUrl(href: string): SiteInfo | null {
     }
 
     // axiom.trade
-    // https://axiom.trade/meme/<tokenAddress>?chain=<chain>
-    // Fast path: return the address from URL; async parse will resolve actual token address if needed.
+    // https://axiom.trade/meme/<id>?chain=<chain>
+    // https://axiom.trade/token/<id>?chain=robinhood  (RH / EVM token pages)
     if (u.hostname.includes('axiom.trade')) {
-      if (parts.length >= 2 && parts[0] === 'meme') {
-        const chain = u.searchParams.get('chain');
+      const tokenSeg = parts.length >= 2 && (parts[0] === 'meme' || parts[0] === 'token') ? parts[1] : '';
+      if (tokenSeg) {
+        const chain = resolveAxiomChainFromUrl(u, tokenSeg);
         if (chain) {
           return {
-            chain: toSiteChain(chain),
-            tokenAddress: parts[1],
+            chain,
+            tokenAddress: tokenSeg,
             platform: 'axiom',
           };
         }
       }
-      // https://axiom.trade/pulse?chain=bnb
-      if (parts.length === 1 && parts[0] === 'pulse') {
+      // pulse / discover / trackers list pages
+      if (parts.length <= 1 && ['pulse', 'discover', 'trackers', 'exp', ''].includes(parts[0] || '')) {
+        const chain = resolveAxiomChainFromUrl(u) || 'bsc';
         return {
-          chain: toSiteChain(u.searchParams.get('chain'), 'bsc'),
+          chain,
           tokenAddress: '',
           platform: 'axiom',
           showBar: true
@@ -345,46 +371,27 @@ export async function parseCurrentUrlFull(href: string): Promise<SiteInfo | null
     if (!base) return null;
 
     if (base.platform === 'axiom') {
-      if (base.chain !== 'sol') {
-        // bnb: keep original AxiomAPI third-party lookup, but fall back to base instead of null (no flicker)
-        const res = await call({
-          type: 'thirdParty:getTokenInfo',
-          platform: 'axiom',
-          chain: base.chain,
-          address: base.tokenAddress,
-        } as const);
-        const tokenInfo = res.tokenInfo;
-        if (!tokenInfo) {
-          console.warn('Dagobang: axiom bnb token info unavailable, fallback to URL address', base);
-          return base;
-        }
-        return {
-          ...base,
-          tokenAddress: tokenInfo.address,
-        };
-      }
-      // sol: fiber-extracted mint takes priority (page already has data, zero network requests)
-      const axiomPair = (typeof window !== 'undefined'
-        ? (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__
-        : null) as unknown;
       const urlAddr = base.tokenAddress;
-      const isPairObj = (v: unknown): v is { pairAddress: unknown; tokenAddress: unknown } =>
-        !!v && typeof v === 'object' && 'pairAddress' in v && 'tokenAddress' in v;
-      const extractedMint = isPairObj(axiomPair)
-        && axiomPair.pairAddress === urlAddr
-        && typeof axiomPair.tokenAddress === 'string'
-        ? axiomPair.tokenAddress
+      const axiomPair = typeof window !== 'undefined'
+        ? (window as unknown as { __DAGOBANG_AXIOM_PAIR__?: unknown }).__DAGOBANG_AXIOM_PAIR__
         : null;
-      if (extractedMint) {
-        return { ...base, tokenAddress: extractedMint };
+      const isPairObj = (v: unknown): v is { pairAddress?: unknown; tokenAddress?: unknown } =>
+        !!v && typeof v === 'object' && ('pairAddress' in v || 'tokenAddress' in v);
+      if (isPairObj(axiomPair) && typeof axiomPair.tokenAddress === 'string' && axiomPair.tokenAddress) {
+        const pairAddr = typeof axiomPair.pairAddress === 'string' ? axiomPair.pairAddress : '';
+        if (
+          pairAddr.toLowerCase() === urlAddr.toLowerCase()
+          || axiomPair.tokenAddress.toLowerCase() === urlAddr.toLowerCase()
+        ) {
+          return { ...base, tokenAddress: axiomPair.tokenAddress };
+        }
       }
-      // Extraction unavailable (mint-type URL / challenge page): gmgn API fills in — same pattern as xxyy/dexscreener branch
-      const tokenInfo = await TokenAPI.getTokenInfo('gmgn', base.chain, urlAddr).catch(() => null);
+      const tokenInfo = await TokenAPI.getTokenInfo('axiom', base.chain, urlAddr).catch(() => null);
       if (tokenInfo?.address) {
         return { ...base, tokenAddress: tokenInfo.address };
       }
       console.warn('Dagobang: axiom token resolve unavailable, fallback to URL address', base);
-      return base;   // flicker fix: was return null
+      return base;
     }
 
     if (base.platform === 'xxyy' || base.platform === 'dexscreener') {

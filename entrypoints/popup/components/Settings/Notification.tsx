@@ -2,6 +2,7 @@ import { Play } from 'lucide-react';
 import { useTradeSuccessSound } from '@/hooks/useTradeSuccessSound';
 import { TRADE_SUCCESS_SOUND_PRESETS, type TradeSuccessSoundPreset } from '@/types/extention';
 import type { SettingsDraftProps } from './types';
+import { AUTO_LOCK_SECONDS_MIN, AUTO_LOCK_SECONDS_MAX } from '@/utils/defaults';
 
 const OFF_VALUE = '__off__';
 
@@ -74,6 +75,9 @@ export function Notification({ settingsDraft, setSettingsDraft, tt }: SettingsDr
             <div className="text-[14px] text-zinc-400">{tt('popup.settings.autoLockSeconds')}</div>
             <input
               type="number"
+              min={AUTO_LOCK_SECONDS_MIN}
+              max={AUTO_LOCK_SECONDS_MAX}
+              step={1}
               className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[14px] outline-none"
               value={settingsDraft.autoLockSeconds}
               onChange={(e) => setSettingsDraft((s) => ({ ...s, autoLockSeconds: Number(e.target.value) }))}

@@ -12,7 +12,9 @@ const CHAIN_NAME_ALIASES: Record<string, string> = {
   bnb: "bsc",
   robinhood: "rh",
   solana: "sol",
+  ethereum: "eth",
   hyperevm: "hyper",
+  hype: "hyper",
 };
 
 export const chainNameToChainId = Object.entries(chainNames).reduce(
@@ -56,4 +58,22 @@ export function toDexScreenerChainName(nameOrId: string | number): string {
   return fallback || "bsc";
 }
 
+/** Axiom URL/API slug. BSC is `bnb`, RH is `robinhood`. */
+export function toAxiomChainName(nameOrId: string | number): string {
+  const id = typeof nameOrId === "number" ? nameOrId : getChainIdByName(nameOrId);
+  if (id === ChainId.BNB) return "bnb";
+  if (id === ChainId.RH) return "robinhood";
+  if (Number.isFinite(id) && chainNames[id]) return chainNames[id];
+  const fallback = typeof nameOrId === "string" ? normalizeChainName(nameOrId) : "";
+  return fallback || "bnb";
+}
+
 export const SUPPORTED_CHAINS = ["eth", "bsc", "hyper", "sol", "rh"];
+
+export const CHAIN_SELECT_OPTIONS: ReadonlyArray<{ id: ChainId; label: string }> = [
+  { id: ChainId.ETH, label: "ETH" },
+  { id: ChainId.BNB, label: "BNB" },
+  { id: ChainId.HYPER, label: "HYPER" },
+  { id: ChainId.RH, label: "RH" },
+  { id: ChainId.SOL, label: "SOL" },
+];

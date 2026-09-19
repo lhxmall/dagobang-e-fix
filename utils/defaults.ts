@@ -549,6 +549,9 @@ const DEFAULT_ADVANCED_AUTO_SELL: AdvancedAutoSellConfig = {
   },
 };
 
+export const AUTO_LOCK_SECONDS_MIN = 30;
+export const AUTO_LOCK_SECONDS_MAX = 3600;
+
 export function defaultSettings(): Settings {
   return {
     chainId: ChainId.BNB,

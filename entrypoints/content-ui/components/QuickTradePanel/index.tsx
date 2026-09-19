@@ -307,6 +307,7 @@ export function QuickTradePanel({
     >
       <Header
         siteInfo={siteInfo}
+        tokenSymbol={tokenSymbol}
         onDragStart={onDragStart}
         onMinimize={onMinimize}
         isEditing={isEditing}

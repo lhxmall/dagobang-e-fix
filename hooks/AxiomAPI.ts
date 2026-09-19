@@ -1,254 +1,224 @@
 import { getAxiomLaunchpad } from "@/constants/launchpad";
 import { TokenInfo } from "@/types/token";
+import { ChainId } from "@/constants/chains/chainId";
+import { chainNames, getChainIdByName } from "@/constants/chains/chainName";
+import { getNativeSymbol } from "@/constants/chains";
+import { resolveRouteTokenLabel } from "@/utils/quoteTokenLabels";
 
-// Axiom API Response Interface
 export interface AxiomPairInfoResponse {
   status: string;
-  data: {
-    pairAddress: string;
-    factory: string;
-    token0: string;
-    token1: string;
-    fee: number;
-    pairCreatedBlockHash: string;
-    pairCreatedBlockNumber: number;
-    protocol: string;
-    pairCreatedAt: string;
-    pairFinalizedAt: string;
-    openTrading: string;
-    initialLiquidityToken: string;
-    initialLiquidityQuote: string;
-    initialLiquidityUsd: string | null;
-    initialLiquidityBnb: string | null;
-    tokenAddress: string;
-    quoteTokenAddress: string;
-    creator: string;
-    decimals: number;
-    tokenCreatedBlockHash: string;
-    tokenName: string;
-    tokenTicker: string;
-    uri: string | null;
-    tokenImage: string;
-    tokenCreatedAt: string;
-    tokenFinalizedAt: string;
-    website: string | null;
-    twitter: string | null;
-    telegram: string | null;
-    discord: string | null;
-    mintAuthority: string | null;
-    freezeAuthority: string | null;
-    supply: string;
-    extra: any;
-    dexPaid: boolean;
-  };
+  data: AxiomPairPayload;
 }
 
-// Solana pair-info response (flat shape, v=2 endpoint)
-interface AxiomSolPairInfoResponse {
-  tokenAddress?: string;
-  tokenName?: string;
-  tokenTicker?: string;
-  tokenDecimals?: number;
-  tokenImage?: string;
+type AxiomPairExtra = {
+  migratedFrom?: string | null;
+  migratedTo?: string | null;
+} | null;
+
+export type AxiomPairPayload = {
   pairAddress?: string;
+  factory?: string;
+  token0?: string;
+  token1?: string;
+  fee?: number;
   protocol?: string;
   displayProtocol?: string;
+  tokenAddress?: string;
+  quoteTokenAddress?: string;
+  decimals?: number;
+  tokenDecimals?: number;
+  tokenName?: string;
+  tokenTicker?: string;
+  tokenImage?: string;
   website?: string | null;
   twitter?: string | null;
   telegram?: string | null;
   discord?: string | null;
-  supply?: number;
-  extra?: { migratedFrom?: string | null; migratedTo?: string | null } | null;
-}
+  extra?: AxiomPairExtra;
+  [key: string]: unknown;
+};
 
 export class AxiomAPI {
-  private static readonly BASE_URL_BNB = 'https://api2-bnb.axiom.trade';
-  private static readonly BASE_URL_SOL = 'https://api10.axiom.trade';
+  private static pairInfoBase(chainId: number): string | null {
+    switch (chainId) {
+      case ChainId.SOL:
+        return "https://api10.axiom.trade";
+      case ChainId.BNB:
+        return "https://api2-bnb.axiom.trade";
+      case ChainId.ETH:
+        return "https://api2-eth.axiom.trade";
+      case ChainId.RH:
+        return "https://api2-robinhood.axiom.trade";
+      case ChainId.HYPER:
+        return "https://api2-hyper.axiom.trade";
+      default:
+        return null;
+    }
+  }
 
-  /**
-   * Make HTTP request using fetch API with proper headers
-   */
   private static async makeRequest(url: string, options: RequestInit): Promise<Response> {
-    // Calculate content-length for POST requests
     const headers = { ...options.headers } as Record<string, string>;
 
-    if (options.method === 'POST' && options.body) {
-      headers['content-length'] = new Blob([options.body as string]).size.toString();
+    if (options.method === "POST" && options.body) {
+      headers["content-length"] = new Blob([options.body as string]).size.toString();
     }
 
     const requestOptions: RequestInit = {
       ...options,
       headers,
-      // Ensure credentials are included for authentication
-      credentials: 'include',
-      // Set mode to 'cors' explicitly
-      mode: 'cors'
+      credentials: "include",
+      mode: "cors",
     };
 
     try {
-      const response = await fetch(url, requestOptions);
-      return response;
+      return await fetch(url, requestOptions);
     } catch (error) {
-      console.error('Request failed:', error);
+      console.error("Request failed:", error);
       throw error;
     }
   }
 
-  /**
-   * Get common request headers
-   */
   private static getHeaders(): HeadersInit {
-    const cookieValue = typeof document !== 'undefined' ? document.cookie : '';
+    const cookieValue = typeof document !== "undefined" ? document.cookie : "";
     return {
-      'accept': 'application/json, text/plain, */*',
-      'accept-encoding': 'gzip, deflate, br, zstd',
-      'accept-language': 'zh-CN,zh;q=0.9,ru;q=0.8',
+      accept: "application/json, text/plain, */*",
+      "accept-encoding": "gzip, deflate, br, zstd",
+      "accept-language": "zh-CN,zh;q=0.9,ru;q=0.8",
+      "content-type": "application/json",
+      cookie: cookieValue,
+      origin: "https://axiom.trade",
+      referer: "https://axiom.trade/",
+      "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "Windows",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+    };
+  }
 
-      'content-type': 'application/json',
-      'cookie': cookieValue,
-      'origin': 'https://axiom.trade',
-      'referer': 'https://axiom.trade/',
-      'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': 'Windows',
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-origin',
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+  static readPageTokenLabel(): string | null {
+    if (typeof document === "undefined") return null;
+    const texts: string[] = [
+      String(document.title || ""),
+      String(document.querySelector('meta[property="og:title"]')?.getAttribute("content") || ""),
+      String(document.querySelector("h1")?.textContent || ""),
+    ];
+    for (const raw of texts) {
+      const label = this.parseTickerFromText(raw);
+      if (label) return label;
     }
+    return null;
   }
 
-  /**
-   * Helper to determine quote token symbol from address
-   */
-  private static getQuoteTokenSymbol(address: string): string {
-    const addr = address.toLowerCase();
-    if (addr === '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c') return 'BNB'; // WBNB
-    if (addr === '0x55d398326f99059ff775485246999027b3197955') return 'USDT'; // BSC-USD
-    return 'UNKNOWN';
+  private static parseTickerFromText(raw: string): string | null {
+    const title = String(raw || "").trim();
+    if (!title) return null;
+    const head = (title.split("|")[0] || "").trim();
+    const name = head.replace(/\s+[↑↓].*$/u, "").replace(/\s+\$[\d.].*$/, "").trim();
+    if (!name || name.length > 24) return null;
+    if (/^axiom/i.test(name)) return null;
+    if (/^0x/i.test(name)) return null;
+    if (/discover|pulse|trackers|login/i.test(name)) return null;
+    return name;
   }
 
-  /**
-   * Get token information
-   * @param chain Blockchain chain (currently only supports 'bsc'/'bnb')
-   * @param address Token address
-   */
+  static tokenInfoFromPairPayload(chain: string, pair: AxiomPairPayload): TokenInfo | null {
+    const chainId = getChainIdByName(chain);
+    if (!Number.isFinite(chainId) || chainId <= 0) return null;
+    const nested = pair.token && typeof pair.token === "object" ? (pair.token as Record<string, unknown>) : null;
+    const pick = (...vals: unknown[]) => {
+      for (const val of vals) {
+        if (typeof val === "string" && val.trim()) return val.trim();
+      }
+      return "";
+    };
+    const mint = pick(pair.tokenAddress, pair.address, nested?.tokenAddress, nested?.address, nested?.mint);
+    if (!mint) return null;
+    const name = pick(pair.tokenName, pair.name, nested?.tokenName, nested?.name);
+    const ticker = pick(pair.tokenTicker, pair.symbol, pair.ticker, nested?.tokenTicker, nested?.symbol, nested?.ticker);
+    const pageLabel = this.readPageTokenLabel();
+    const displayName = name || ticker || pageLabel;
+    const displayTicker = ticker || name || pageLabel;
+    if (!displayName && !displayTicker) return null;
+    const decimalsRaw = Number(pair.tokenDecimals ?? pair.decimals);
+    const decimalsFallback = chainId === ChainId.SOL ? 6 : 18;
+    const decimals =
+      Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 36 ? decimalsRaw : decimalsFallback;
+    const pairAddress = typeof pair.pairAddress === "string" && pair.pairAddress ? pair.pairAddress : "";
+    const quoteAddress = typeof pair.quoteTokenAddress === "string" ? pair.quoteTokenAddress : "";
+    const extra = pair.extra && typeof pair.extra === "object" ? pair.extra : null;
+    const migrated = !!(extra?.migratedFrom || extra?.migratedTo);
+    const launchpad = getAxiomLaunchpad(pair);
+    const chainName = chainNames[chainId] || "bsc";
+    const quoteSymbol =
+      chainId === ChainId.SOL && !quoteAddress
+        ? "SOL"
+        : resolveRouteTokenLabel({
+            chainId,
+            address: quoteAddress,
+            fallbackSymbol: getNativeSymbol(chainId),
+          });
+    return {
+      chain: chainName,
+      address: mint,
+      name: displayName,
+      symbol: displayTicker,
+      decimals,
+      logo: typeof pair.tokenImage === "string" ? pair.tokenImage : "",
+      launchpad,
+      launchpad_progress: 0,
+      launchpad_platform: launchpad,
+      launchpad_status: migrated ? 1 : 0,
+      quote_token: quoteSymbol,
+      quote_token_address: quoteAddress,
+      pool_pair: pairAddress,
+      biggest_pool_address: pairAddress || undefined,
+      website: pair.website || undefined,
+      twitterUrl: pair.twitter || undefined,
+      telegramUrl: pair.telegram || undefined,
+      discordUrl: pair.discord || undefined,
+    };
+  }
+
   public static async getTokenInfo(chain: string, address: string): Promise<TokenInfo | null> {
-    const chainLower = chain.toLowerCase();
-    if (chainLower === 'sol') {
-      return this.getSolTokenInfo(address);
-    }
-    if (chainLower !== 'bsc' && chainLower !== 'bnb') {
-      console.warn(`AxiomAPI: Chain ${chain} not supported`);
+    const chainId = getChainIdByName(chain);
+    const base = this.pairInfoBase(chainId);
+    if (!base || !address) {
+      if (!base) console.warn(`AxiomAPI: Chain ${chain} not supported`);
       return null;
     }
-
-    const endpoint = '/pair-info';
-    const params = new URLSearchParams({
-      pairAddress: address // Using token address as pair address based on examples
-    });
-
-    const url = `${this.BASE_URL_BNB}${endpoint}?${params.toString()}`;
-
-    try {
-      const headers = this.getHeaders();
-      const response = await this.makeRequest(url, {
-        method: 'GET',
-        headers
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const result = await response.json() as AxiomPairInfoResponse;
-
-      if (result.status === 'Success' && result.data) {
-        const data = result.data;
-        const quoteTokenSymbol = this.getQuoteTokenSymbol(data.quoteTokenAddress);
-
-        const platform = getAxiomLaunchpad(data);
-        console.log('axiom data', data);
-        return {
-          chain: 'bsc',
-          address: data.tokenAddress,
-          name: data.tokenName,
-          symbol: data.tokenTicker,
-          decimals: data.decimals,
-          logo: data.tokenImage,
-          launchpad: platform,
-          launchpad_progress: 0, // Not available in Axiom response
-          launchpad_platform: platform,
-          launchpad_status: (data.extra?.migratedFrom || data.extra?.migratedTo) ? 1 : 0,
-          quote_token: quoteTokenSymbol,
-          quote_token_address: data.quoteTokenAddress,
-          pool_pair: data.pairAddress,
-        };
-      }
-
-      return null;
-    } catch (error) {
-      console.error('Failed to fetch token info from Axiom:', error);
-      // Fallback or rethrow depending on requirements. For now, returning null to be safe.
-      return null;
-    }
-  }
-
-  /**
-   * Solana token info via axiom's own pair-info API.
-   * Same-site on axiom pages (cookies flow) and usable from the SW (host_permissions, no CORS).
-   */
-  private static async getSolTokenInfo(pairAddress: string): Promise<TokenInfo | null> {
-    const url = `${this.BASE_URL_SOL}/pair-info?pairAddress=${encodeURIComponent(pairAddress)}&v=2`;
+    const params = new URLSearchParams({ pairAddress: address });
+    if (chainId === ChainId.SOL) params.set("v", "2");
+    const url = `${base}/pair-info?${params.toString()}`;
     try {
       const response = await this.makeRequest(url, {
-        method: 'GET',
+        method: "GET",
         headers: this.getHeaders(),
       });
-      if (!response.ok) {
-        return null;
-      }
-      const data = await response.json() as AxiomSolPairInfoResponse;
-      if (!data || !data.tokenAddress) {
-        return null;
-      }
-      const protocol = String(data.protocol || data.displayProtocol || '').trim();
-      const migrated = !!(data.extra?.migratedFrom || data.extra?.migratedTo);
-      const launchpad = this.mapSolProtocolToLaunchpad(protocol, migrated);
-      if (!data.tokenName && !data.tokenTicker) return null;
-      return {
-        chain: 'sol',
-        address: data.tokenAddress,
-        name: data.tokenName || data.tokenTicker || '',
-        symbol: data.tokenTicker || data.tokenName || '',
-        decimals: Number.isFinite(Number(data.tokenDecimals)) ? Number(data.tokenDecimals) : 6,
-        logo: data.tokenImage || '',
-        launchpad,
-        launchpad_progress: 0,
-        launchpad_platform: launchpad,
-        launchpad_status: migrated ? 1 : 0,
-        quote_token: 'SOL',
-        quote_token_address: '',
-        pool_pair: data.pairAddress || pairAddress,
-        website: data.website || undefined,
-        twitterUrl: data.twitter || undefined,
-        telegramUrl: data.telegram || undefined,
-        discordUrl: data.discord || undefined,
-      };
+      if (!response.ok) return null;
+      const result: unknown = await response.json();
+      const payload = this.unwrapPairPayload(result);
+      if (!payload) return null;
+      return this.tokenInfoFromPairPayload(chain, payload);
     } catch (error) {
-      console.error('Failed to fetch token info from Axiom (sol):', error);
+      console.error("Failed to fetch token info from Axiom:", error);
       return null;
     }
   }
 
-  /** Map axiom protocol labels to launchpad identifiers understood by the router. */
-  private static mapSolProtocolToLaunchpad(protocol: string, migrated: boolean): string {
-    const p = protocol.toLowerCase();
-    if (p.includes('pump')) return migrated ? 'pumpswap' : 'pumpfun';
-    if (p.includes('raydium')) return 'raydium';
-    if (p.includes('meteora')) return 'meteora';
-    if (p.includes('virtual') || p.includes('believe')) return 'believe';
-    return '';
+  private static unwrapPairPayload(result: unknown): AxiomPairPayload | null {
+    if (!result || typeof result !== "object") return null;
+    const rec = result as Record<string, unknown>;
+    if (rec.status === "Success" && rec.data && typeof rec.data === "object") {
+      return rec.data as AxiomPairPayload;
+    }
+    if (typeof rec.tokenAddress === "string") {
+      return rec as AxiomPairPayload;
+    }
+    return null;
   }
 }
 

@@ -101,7 +101,7 @@ export async function getUnlockedState(): Promise<UnlockedState | null> {
     const state = res[KEYS.unlocked] as UnlockedState;
     if (!state) return null;
     
-    if (state.expiresAt && Date.now() > state.expiresAt) {
+    if (!Number.isFinite(state.expiresAt) || Date.now() > (state.expiresAt as number)) {
       await clearUnlockedState();
       return null;
     }
@@ -124,7 +124,7 @@ export async function getUnlockedSolanaState(): Promise<UnlockedSolanaState | nu
     if (!state) {
       return null;
     }
-    if (state.expiresAt && Date.now() > state.expiresAt) {
+    if (!Number.isFinite(state.expiresAt) || Date.now() > (state.expiresAt as number)) {
       await clearUnlockedSolanaState();
       return null;
     }

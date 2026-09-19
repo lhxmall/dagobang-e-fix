@@ -136,7 +136,11 @@ export function extractLaunchpadPlatform(input: {
 }
 
 export function getAxiomLaunchpad(data: any): string {
-    switch (data.protocol) {
+    const protocol = String(data?.protocol || data?.displayProtocol || '').trim();
+    const extraFrom = String(data?.extra?.migratedFrom || '');
+    const extraTo = String(data?.extra?.migratedTo || '');
+    const migrated = !!(extraFrom || extraTo);
+    switch (protocol) {
         case "Fourmeme":
         case "Fourmeme V2":
             return "fourmeme";
@@ -144,12 +148,29 @@ export function getAxiomLaunchpad(data: any): string {
             return "bn_fourmeme";
         case "Pancakeswap V2":
         case "Pancakeswap V3":
-            if (data.extra?.migratedFrom == "Fourmeme V2")
+            if (extraFrom === "Fourmeme V2" || extraFrom.toLowerCase().includes("fourmeme"))
                 return "fourmeme";
             return "";
         case "Flap":
             return "flap";
         default:
-            return "";
+            break;
     }
+    const p = protocol.toLowerCase();
+    if (!p) return "";
+    if (p.includes("fourmeme") || p.includes("four.meme")) return "fourmeme";
+    if (p.includes("openfour")) return "openfour";
+    if (p.includes("flap")) return "flap";
+    if (p.includes("altfun") || p.includes("alt.fun")) return "altfun";
+    if (p.includes("pons")) return "pons";
+    if (p.includes("long")) return "long";
+    if (p.includes("livo")) return "livo";
+    if (p.includes("trench")) return "trench";
+    if (/(^|[^a-z])o1([^a-z]|$)/.test(p)) return "o1";
+    if (p.includes("pump")) return migrated ? "pumpswap" : "pumpfun";
+    if (p.includes("raydium")) return "raydium";
+    if (p.includes("meteora")) return "meteora";
+    if (p.includes("virtual") || p.includes("believe")) return "believe";
+    if (p.includes("pancake") && extraFrom.toLowerCase().includes("fourmeme")) return "fourmeme";
+    return "";
 }

@@ -38,6 +38,8 @@ import { ReviewPanel } from './components/ReviewPanel';
 import { QuickTradePanel } from './components/QuickTradePanel';
 import { labelQuickTradeRouteHops, reverseQuickTradeRouteHops } from './components/QuickTradePanel/RoutePreviewHint';
 import { isEvmRouteAlignedWithPayToken } from '@/utils/quickTradeRoutePreview';
+import { preferRouteTokenSymbol } from '@/utils/quoteTokenLabels';
+import AxiomAPI from '@/hooks/AxiomAPI';
 import { FloatingToolbar } from './components/FloatingToolbar';
 import { CookingPanel } from './components/CookingPanel';
 import { useDynamicGasPreview } from './components/QuickTradePanel/useDynamicGasPreview';
@@ -1484,6 +1486,24 @@ export default function App() {
   }, [tokenContextKey]);
 
   useEffect(() => {
+    if (tokenContextSiteInfo?.platform !== 'axiom' || !tokenAddressNormalized) return;
+    const apply = () => {
+      const label = AxiomAPI.readPageTokenLabel();
+      if (!label) return;
+      setTokenSymbol((prev) => preferRouteTokenSymbol(prev, label) || label);
+    };
+    apply();
+    const timer = window.setInterval(apply, 800);
+    const titleEl = document.querySelector('title');
+    const obs = titleEl ? new MutationObserver(apply) : null;
+    obs?.observe(titleEl as Node, { childList: true, characterData: true, subtree: true });
+    return () => {
+      window.clearInterval(timer);
+      obs?.disconnect();
+    };
+  }, [tokenAddressNormalized, tokenContextSiteInfo?.platform]);
+
+  useEffect(() => {
     if (!pendingQuickBuy) return;
     if (!settings) return;
     if (!tokenAddressNormalized) return;
@@ -2373,21 +2393,15 @@ export default function App() {
   }, [consumePendingSolTokenDeltaWei]);
 
   const resolvedTokenSymbol = useMemo(() => {
-    const candidates = [
+    const axiomTitle = tokenContextSiteInfo?.platform === 'axiom' ? AxiomAPI.readPageTokenLabel() : null;
+    return preferRouteTokenSymbol(
       tokenSymbol,
       gmgnHoldingTokenSymbol,
       tokenInfo?.symbol,
       tokenInfo?.name,
-    ];
-    for (const candidate of candidates) {
-      const text = typeof candidate === 'string' ? candidate.trim() : '';
-      if (text) return text;
-    }
-    if (tokenAddressNormalized) {
-      return `${tokenAddressNormalized.slice(0, 6)}...${tokenAddressNormalized.slice(-4)}`;
-    }
-    return null;
-  }, [gmgnHoldingTokenSymbol, tokenAddressNormalized, tokenInfo?.name, tokenInfo?.symbol, tokenSymbol]);
+      axiomTitle,
+    );
+  }, [gmgnHoldingTokenSymbol, tokenContextSiteInfo?.platform, tokenInfo?.name, tokenInfo?.symbol, tokenSymbol]);
 
   useEffect(() => {
     let canceled = false;
@@ -2914,26 +2928,14 @@ export default function App() {
       throttleMs: tokenBalanceRefreshThrottleMs,
       tokenInfoCacheTtlMs,
     });
-    if (!refreshIsUnlocked) {
-      logHyperReadDebug('refreshToken.done', {
-        source,
-        force,
-        queryAllWallets,
-        elapsedMs: Date.now() - startedAt,
-        unlocked: false,
-        preservedExistingBalance: true,
-      });
-      return;
-    }
-
     const reqCtxKey = `${tokenContextSiteInfo.platform ?? ''}:${tokenContextSiteInfo.chain ?? ''}:${tokenAddressNormalized ?? ''}`;
     try {
       const metaStartedAt = Date.now();
       const meta = await TokenAPI.getTokenInfo(tokenContextSiteInfo.platform, tokenContextSiteInfo.chain, tokenAddressNormalized, {
         cacheTtlMs: tokenInfoCacheTtlMs,
       });
-      if (isSolana && solRefreshSeq !== solTokenBalanceRefreshSeqRef.current) return;
       const metaElapsedMs = Date.now() - metaStartedAt;
+      if (isSolana && solRefreshSeq !== solTokenBalanceRefreshSeqRef.current) return;
       if (seq !== tokenRefreshSeqRef.current || reqCtxKey !== tokenContextKeyRef.current) return;
       if (meta) {
         let normalizedDecimals =
@@ -2942,7 +2944,7 @@ export default function App() {
             && Number(meta.decimals) <= 36
             ? Number(meta.decimals)
             : (isSolana ? 9 : 18);
-        let normalizedSymbol = meta.symbol;
+        let normalizedSymbol = preferRouteTokenSymbol(meta.symbol, meta.name) || meta.symbol;
         if (isSolana && (!Number.isFinite(meta.decimals) || Number(meta.decimals) <= 0 || Number(meta.decimals) > 36)) {
           try {
             const chainMeta = await call({
@@ -2954,7 +2956,7 @@ export default function App() {
               normalizedDecimals = Number(chainMeta.decimals);
             }
             if (typeof chainMeta.symbol === 'string' && chainMeta.symbol.trim()) {
-              normalizedSymbol = chainMeta.symbol.trim();
+              normalizedSymbol = preferRouteTokenSymbol(chainMeta.symbol, normalizedSymbol) || chainMeta.symbol.trim();
             }
           } catch {
           }
@@ -2963,8 +2965,8 @@ export default function App() {
         setTokenSymbol(normalizedSymbol);
         setTokenDecimals(normalizedDecimals);
 
-        if ((meta as any).tokenPrice) {
-          const p = (meta as any).tokenPrice as { marketCap?: string; liquidity?: string };
+        if (meta.tokenPrice) {
+          const p = meta.tokenPrice;
           setMarketCapDisplay(p.marketCap ?? null);
           setLiquidityDisplay(p.liquidity ?? null);
         } else {
@@ -2972,6 +2974,18 @@ export default function App() {
           setLiquidityDisplay(null);
         }
       }
+      if (!refreshIsUnlocked) {
+        logHyperReadDebug('refreshToken.done', {
+          source,
+          force,
+          queryAllWallets,
+          elapsedMs: Date.now() - startedAt,
+          unlocked: false,
+          preservedExistingBalance: true,
+        });
+        return;
+      }
+
 
       const selectedWalletsForToken = resolveSelectedTradeWallets(refreshWallet, refreshSettings, chainId);
       const allWalletsForToken = ((refreshWallet?.accounts ?? []) as Account[])

@@ -58,7 +58,10 @@ function getQuoteSymbolMap(chainId: number): Map<string, string> {
 }
 
 export function isLikelyTokenAddressLabel(value?: string | null): boolean {
-  return /^0x[a-fA-F0-9]{40}$/.test(String(value || '').trim());
+  const text = String(value || "").trim();
+  if (/^0x[a-fA-F0-9]{40}$/.test(text)) return true;
+  if (/^0x[a-fA-F0-9]{4,6}[.…_]{1,3}[a-fA-F0-9]{4}$/i.test(text)) return true;
+  return false;
 }
 
 export function getKnownQuoteTokenSymbol(chainId: number, address?: string | null): string | null {
@@ -78,7 +81,7 @@ export function preferRouteTokenSymbol(...candidates: Array<string | null | unde
   for (const candidate of candidates) {
     const symbol = String(candidate || '').trim();
     if (!symbol || isLikelyTokenAddressLabel(symbol) || isPlaceholderRouteSymbol(symbol)) continue;
-    if (symbol.endsWith('…') && symbol.startsWith('0x')) continue;
+    if (/^0x/i.test(symbol)) continue;
     return symbol;
   }
   return null;

@@ -159,7 +159,7 @@ export class WalletService {
       accounts: payload.accounts,
       selectedAddress: selectedAddress,
       mnemonic: payload.mnemonic,
-      // expiresAt: Date.now() + settings.autoLockSeconds * 1000, // Auto-lock disabled
+      expiresAt: Date.now() + settings.autoLockSeconds * 1000,
     });
 
     return { address: selectedAddress };

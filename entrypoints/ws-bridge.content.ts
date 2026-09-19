@@ -275,48 +275,141 @@ export default defineContentScript({
         tokenAddress: string;
         tokenName?: string;
         tokenTicker?: string;
-        pairAddress: string;
+        pairAddress?: string;
         [key: string]: unknown;
       };
       const host = window.location.hostname;
       if (!host.includes('axiom.trade')) return;
+
+      const currentUrlToken = (): string =>
+        window.location.pathname.split('/').filter(Boolean).pop() || '';
+
+      const pickStr = (obj: Record<string, unknown>, keys: string[]): string => {
+        for (const key of keys) {
+          const val = obj[key];
+          if (typeof val === 'string' && val.trim()) return val.trim();
+        }
+        return '';
+      };
+
+      const normalizePair = (raw: unknown): AxiomPairInfo | null => {
+        if (!raw || typeof raw !== 'object') return null;
+        const rec = raw as Record<string, unknown>;
+        const nested = rec.data && typeof rec.data === 'object'
+          ? rec.data as Record<string, unknown>
+          : (rec.token && typeof rec.token === 'object' ? rec.token as Record<string, unknown> : rec);
+        const tokenAddress = pickStr(rec, ['tokenAddress', 'address', 'mint', 'ca'])
+          || pickStr(nested, ['tokenAddress', 'address', 'mint', 'ca']);
+        if (!tokenAddress) return null;
+        const tokenTicker = pickStr(rec, ['tokenTicker', 'symbol', 'ticker'])
+          || pickStr(nested, ['tokenTicker', 'symbol', 'ticker']);
+        const tokenName = pickStr(rec, ['tokenName', 'name'])
+          || pickStr(nested, ['tokenName', 'name']);
+        const pairAddress = pickStr(rec, ['pairAddress', 'poolAddress', 'pair'])
+          || pickStr(nested, ['pairAddress', 'poolAddress']);
+        return { ...nested, ...rec, tokenAddress, tokenTicker, tokenName, pairAddress };
+      };
+
+      const postPair = (pair: AxiomPairInfo) => {
+        const seg = currentUrlToken().toLowerCase();
+        if (!seg) return;
+        const pairAddr = String(pair.pairAddress || '').toLowerCase();
+        const mint = String(pair.tokenAddress || '').toLowerCase();
+        if (pairAddr !== seg && mint !== seg) return;
+        window.postMessage({ type: 'DAGOBANG_AXIOM_PAIR', pair, ts: Date.now() }, '*');
+      };
+
+      const tickerFromTitle = (): string => {
+        const head = String(document.title || '').split('|')[0]?.trim() || '';
+        const name = head.replace(/\s+[↑↓].*$/u, '').trim();
+        if (!name || name.length > 24 || /^0x/i.test(name) || /axiom/i.test(name)) return '';
+        return name;
+      };
+
+      const postFromTitle = () => {
+        const tokenAddress = currentUrlToken();
+        const tokenTicker = tickerFromTitle();
+        if (!tokenAddress || !tokenTicker) return;
+        if (!window.location.pathname.includes('/meme/') && !window.location.pathname.includes('/token/')) return;
+        postPair({ tokenAddress, tokenTicker, tokenName: tokenTicker });
+      };
+
+      const origFetch = window.fetch.bind(window);
+      window.fetch = async (...args: Parameters<typeof fetch>) => {
+        const res = await origFetch(...args);
+        try {
+          const req = args[0];
+          const url = typeof req === 'string' ? req : req instanceof Request ? req.url : '';
+          if (res.ok && /pair-info|token-info|pairInfo|tokenInfo/i.test(url)) {
+            res.clone().json().then((data: unknown) => {
+              const pair = normalizePair(data);
+              if (pair) postPair(pair);
+            }).catch(() => undefined);
+          }
+        } catch {
+        }
+        return res;
+      };
+
+      postFromTitle();
+      const titleEl = document.querySelector('title');
+      if (titleEl) {
+        new MutationObserver(postFromTitle).observe(titleEl, { childList: true, characterData: true, subtree: true });
+      }
+      window.setInterval(postFromTitle, 2000);
       const scanOnce = (): boolean => {
         try {
           const root = document.documentElement;
           const fiberKey = Object.keys(root).find((k) => k.startsWith('__reactFiber$'));
           if (!fiberKey) return false;
           const seen = new Set<unknown>();
+          const pickStr = (obj: Record<string, unknown>, keys: string[]): string => {
+            for (const key of keys) {
+              const val = obj[key];
+              if (typeof val === 'string' && val.trim()) return val.trim();
+            }
+            return '';
+          };
+          const normalizePair = (raw: unknown): AxiomPairInfo | null => {
+            if (!raw || typeof raw !== 'object') return null;
+            const rec = raw as Record<string, unknown>;
+            const nested = rec.token && typeof rec.token === 'object' ? rec.token as Record<string, unknown> : rec;
+            const tokenAddress = pickStr(rec, ['tokenAddress', 'address', 'mint', 'ca'])
+              || pickStr(nested, ['tokenAddress', 'address', 'mint', 'ca']);
+            if (!tokenAddress) return null;
+            const tokenTicker = pickStr(rec, ['tokenTicker', 'symbol', 'ticker'])
+              || pickStr(nested, ['tokenTicker', 'symbol', 'ticker']);
+            const tokenName = pickStr(rec, ['tokenName', 'name'])
+              || pickStr(nested, ['tokenName', 'name']);
+            const pairAddress = pickStr(rec, ['pairAddress', 'poolAddress', 'pair']);
+            return { ...rec, tokenAddress, tokenTicker, tokenName, pairAddress };
+          };
           const walk = (f: unknown): AxiomPairInfo | null => {
-            if (!f || seen.has(f) || seen.size > 5000) return null;
+            if (!f || seen.has(f) || seen.size > 12000) return null;
             seen.add(f);
             try {
-              const p: unknown = (f as { memoizedProps?: unknown }).memoizedProps;
-              const hasPair = (obj: unknown): boolean =>
-                !!obj && typeof obj === 'object' && 'pair' in obj
-                  ? (() => { const inner: unknown = (obj as { pair: unknown }).pair; return !!inner && typeof inner === 'object' && 'tokenAddress' in inner && typeof (inner as { tokenAddress: unknown }).tokenAddress === 'string'; })()
-                  : false;
-              const hasFlatPair = (obj: unknown): boolean =>
-                !!obj && typeof obj === 'object' && 'tokenAddress' in obj && 'pairAddress' in obj
-                  && typeof (obj as { tokenAddress: unknown }).tokenAddress === 'string'
-                  && typeof (obj as { pairAddress: unknown }).pairAddress === 'string';
-              if (hasPair(p)) {
-                return (p as { pair: AxiomPairInfo }).pair;
-              }
-              if (hasFlatPair(p)) {
-                const typed = p as AxiomPairInfo;
-                return { tokenAddress: typed.tokenAddress, tokenName: typed.tokenName, tokenTicker: typed.tokenTicker, pairAddress: typed.pairAddress };
-              }
+              const node = f as { memoizedProps?: unknown; memoizedState?: unknown; child?: unknown; sibling?: unknown };
+              const fromProps = normalizePair(node.memoizedProps)
+                || (node.memoizedProps && typeof node.memoizedProps === 'object' && 'pair' in node.memoizedProps
+                  ? normalizePair((node.memoizedProps as { pair: unknown }).pair)
+                  : null);
+              if (fromProps) return fromProps;
+              const fromState = normalizePair(node.memoizedState);
+              if (fromState) return fromState;
             } catch { }
             const node = f as { child?: unknown; sibling?: unknown };
             return walk(node.child) ?? walk(node.sibling);
           };
           const pair = walk((root as unknown as Record<string, unknown>)[fiberKey]);
-          // The React tree also carries OTHER tokens' pairs (watchlists, trending lists).
-          // Only accept the pair that matches the current /meme/<pairAddress> URL.
+          // React tree also carries other tokens (watchlists). Accept the pair whose
+          // pool or mint matches the current /meme/<id> URL (Sol uses pool, EVM often mint).
           const urlSegment = window.location.pathname.split('/').filter(Boolean).pop() || '';
           if (!pair || !urlSegment) return false;
-          if (String(pair.pairAddress).toLowerCase() !== urlSegment.toLowerCase()) return false;
-          const key = pair.pairAddress + ':' + pair.tokenAddress;
+          const seg = urlSegment.toLowerCase();
+          const pairAddr = String(pair.pairAddress || '').toLowerCase();
+          const mint = String(pair.tokenAddress || '').toLowerCase();
+          if (pairAddr !== seg && mint !== seg) return false;
+          const key = String(pair.pairAddress || '') + ':' + pair.tokenAddress;
           const g = window as unknown as { __DAGOBANG_LAST_AXIOM_PAIR__?: string };
           if (g.__DAGOBANG_LAST_AXIOM_PAIR__ !== key) {
             g.__DAGOBANG_LAST_AXIOM_PAIR__ = key;
@@ -338,8 +431,8 @@ export default defineContentScript({
       let replayUntil = 0;
       const dispatch = () => {
         const tick = () => {
-          // Only keep scanning on /meme/ pages; other axiom pages never carry pair data.
-          if (!window.location.pathname.includes('/meme/')) return;
+          // Token pages live at /meme/ (sol) and /token/ (evm / RH).
+          if (!window.location.pathname.includes('/meme/') && !window.location.pathname.includes('/token/')) return;
           if (scanOnce()) {
             found = true;
             replayUntil = Date.now() + 5 * 60 * 1000;

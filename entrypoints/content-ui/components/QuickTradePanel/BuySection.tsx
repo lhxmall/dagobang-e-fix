@@ -442,7 +442,7 @@ export function BuySection({
           </div>
           <RoutePreviewHint label={previewRouteLabel} hops={previewRouteHops} loading={previewRouteLoading} tone="buy" locale={locale} />
           <div className="min-w-0 truncate text-right text-emerald-300/85">
-            ≈ {formatAmount(activePreviewTokens)} {tokenSymbol || t('contentUi.common.token', locale)}
+            ≈ {formatAmount(activePreviewTokens)} {tokenSymbol || ''}
           </div>
         </div>
       </div>

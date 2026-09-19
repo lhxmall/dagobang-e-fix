@@ -1,7 +1,7 @@
 import type { Settings, AutoTradeConfig, AdvancedAutoSellConfig } from '../types/extention';
 import type { ChainAddress } from '@/types/chain/address';
 import { TRADE_SUCCESS_SOUND_PRESETS } from '../types/extention';
-import { defaultSettings } from './defaults';
+import { defaultSettings, AUTO_LOCK_SECONDS_MIN, AUTO_LOCK_SECONDS_MAX } from './defaults';
 import { ChainId } from '@/constants/chains';
 
 // Simple normalization helper (could be moved to a formatter util if needed)
@@ -121,7 +121,7 @@ export function validateSettings(input: Settings): Settings | null {
   const chainId = supportedChainIds.includes(inputChainId as any)
     ? inputChainId
     : defaults.chainId;
-  const autoLockSeconds = clampNumber(input.autoLockSeconds, 30, 3600, defaults.autoLockSeconds);
+  const autoLockSeconds = clampNumber(input.autoLockSeconds, AUTO_LOCK_SECONDS_MIN, AUTO_LOCK_SECONDS_MAX, defaults.autoLockSeconds);
   const selectedTradeWallets = Array.isArray((input as any).selectedTradeWallets)
     ? ((input as any).selectedTradeWallets as unknown[])
       .map((v) => normalizeChainAddress(typeof v === 'string' ? v : ''))

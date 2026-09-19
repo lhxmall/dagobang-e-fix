@@ -2,7 +2,7 @@ import { ChevronDown, Globe, Settings } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { normalizeLocale, t, type Locale } from '@/utils/i18n';
 import { ChainCoinIcon } from '@/components/Coins';
-import { ChainId } from '@/constants/chains/chainId';
+import { CHAIN_SELECT_OPTIONS } from '@/constants/chains/chainName';
 
 type HeaderProps = {
   chainId?: number;
@@ -32,10 +32,9 @@ export function Header({ chainId, onChainChange, isUnlocked, onSettingsClick, lo
                 value={chainId}
                 onChange={(e) => onChainChange?.(Number(e.target.value))}
               >
-                <option value={ChainId.BNB}>BNB</option>
-                <option value={ChainId.HYPER}>HYPER</option>
-                <option value={ChainId.RH}>RH</option>
-                <option value={ChainId.SOL}>SOL</option>
+                {CHAIN_SELECT_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>{opt.label}</option>
+                ))}
               </select>
               <ChevronDown size={14} className="pointer-events-none absolute right-2 text-zinc-400" />
             </span>

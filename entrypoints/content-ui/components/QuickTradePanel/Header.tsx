@@ -18,6 +18,7 @@ import { WalletSelectorTrigger } from '@/entrypoints/content-ui/components/Walle
 
 type HeaderProps = {
   siteInfo: SiteInfo;
+  tokenSymbol?: string | null;
   onDragStart: (e: ReactPointerEvent) => void;
   onMinimize: () => void;
   isEditing: boolean;
@@ -45,6 +46,7 @@ type HeaderProps = {
 
 export function Header({
   siteInfo,
+  tokenSymbol,
   onDragStart,
   onMinimize,
   isEditing,
@@ -94,6 +96,11 @@ export function Header({
         <div className="flex items-center mr-1">
           <Logo size={{ width: '24px', height: '24px' }} />
         </div>
+        {tokenSymbol ? (
+          <span className="max-w-[96px] truncate text-[13px] font-semibold text-zinc-100" title={tokenSymbol}>
+            {tokenSymbol}
+          </span>
+        ) : null}
         {!siteInfo.showBar && <button
           type="button"
           className={
