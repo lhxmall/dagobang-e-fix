@@ -1,4 +1,4 @@
-import type { TxBuyInput, TxSellInput, SubmitChannel, TradeTurboPrewarmInput } from '@/types/extention';
+import type { TxBuyInput, TxSellInput, SubmitChannel, TradeTurboPrewarmInput, TradePreviewRouteInput, QuickTradeRoutePreview } from '@/types/extention';
 import type { ChainAddress, EvmAddress } from '@/types/chain';
 import type { TokenInfo } from '@/types/token';
 
@@ -89,7 +89,8 @@ export interface WalletAdapter {
 }
 
 export interface TradeExecutor {
-  prewarmTurbo(input: TradeTurboPrewarmInput): Promise<void>;
+  prewarmTurbo(input: TradeTurboPrewarmInput): Promise<QuickTradeRoutePreview | null>;
+  previewQuickTradeRoute(input: TradePreviewRouteInput): Promise<QuickTradeRoutePreview | null>;
   refreshNonce(input: {
     chainId: number;
     fromAddress?: ChainAddress;

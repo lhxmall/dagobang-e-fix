@@ -31,6 +31,21 @@ export enum HyperSwapType {
   HYPER_ZAP_SELL = 4,
 }
 
+export function toRhDexSwapType(swapType: SwapType): RhSwapType {
+  if (swapType === SwapType.V3_EXACT_IN) return RhSwapType.V3_EXACT_IN;
+  if (swapType === SwapType.V4_EXACT_IN) return RhSwapType.V4_EXACT_IN;
+  return RhSwapType.V2_EXACT_IN;
+}
+
+export enum RhSwapType {
+  V2_EXACT_IN = 0,
+  V3_EXACT_IN = 1,
+  V4_EXACT_IN = 2,
+  PONS_V1_EXACT_IN = 3,
+  PONS_V2_BUY = 4,
+  PONS_V2_SELL = 5,
+}
+
 export type Hex = `0x${string}`;
 export type Address = `0x${string}`;
 
@@ -78,6 +93,8 @@ export function getRouterSwapDesc(params: {
   fee: number;
   tickSpacing?: number;
   data?: Hex;
+  poolManager?: Address;
+  hooks?: Address;
 }): SwapDescLike {
   return {
     swapType: params.swapType,
@@ -86,9 +103,9 @@ export function getRouterSwapDesc(params: {
     poolAddress: params.poolAddress,
     fee: params.fee,
     tickSpacing: params.tickSpacing ?? 0,
-    hooks: ZERO_ADDRESS,
+    hooks: params.hooks ?? ZERO_ADDRESS,
     hookData: '0x',
-    poolManager: ZERO_ADDRESS,
+    poolManager: params.poolManager ?? ZERO_ADDRESS,
     parameters: ZERO32,
     data: params.data ?? '0x',
   };

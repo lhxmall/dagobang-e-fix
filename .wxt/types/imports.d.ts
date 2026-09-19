@@ -22,6 +22,7 @@ declare global {
   const USDCCoinIcon: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/components/Coins').USDCCoinIcon
   const asAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').asAddress
   const browser: typeof import('wxt/browser').browser
+  const buildFastQuickTradeRoutePreview: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').buildFastQuickTradeRoutePreview
   const call: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/messaging').call
   const classifyBroadcastError: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').classifyBroadcastError
   const classifyFlapRoute: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').classifyFlapRoute
@@ -64,24 +65,33 @@ declare global {
   const formatShortAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').formatShortAddress
   const formatTime: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').formatTime
   const getDexPoolPrefer: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').getDexPoolPrefer
+  const getKnownQuoteTokenSymbol: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').getKnownQuoteTokenSymbol
   const getNonceErrorKindFromText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').getNonceErrorKindFromText
   const getRandomSolanaTipRecipient: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getRandomSolanaTipRecipient
   const getSolanaTipAccounts: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getSolanaTipAccounts
   const getSolanaTipMinimumNative: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getSolanaTipMinimumNative
   const getSolanaTipPresetValue: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getSolanaTipPresetValue
   const getSolanaTipProviderLabel: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getSolanaTipProviderLabel
+  const getTradeRouteStableAddresses: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').getTradeRouteStableAddresses
   const hasConfirmedFlapLaunchpadIdentity: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').hasConfirmedFlapLaunchpadIdentity
   const hasConfirmedFlapOuterRoute: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').hasConfirmedFlapOuterRoute
   const hasConfirmedFlapStocksIdentity: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').hasConfirmedFlapStocksIdentity
   const hasNonTerminalFlapOuterQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').hasNonTerminalFlapOuterQuote
+  const hashUniswapV4PoolId: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/uniswapV4PoolKey').hashUniswapV4PoolId
   const inferLaunchpadFamilyByAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').inferLaunchpadFamilyByAddress
   const injectScript: typeof import('wxt/utils/inject-script').injectScript
   const isAllowanceLikeText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').isAllowanceLikeText
+  const isEvmRouteAlignedWithPayToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').isEvmRouteAlignedWithPayToken
+  const isFlapPortalOrManagerAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').isFlapPortalOrManagerAddress
   const isFlapSuffixAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').isFlapSuffixAddress
   const isFourMemeSuffixAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').isFourMemeSuffixAddress
   const isHexPrivateKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').isHexPrivateKey
   const isInFlightLimitLikeText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').isInFlightLimitLikeText
+  const isLikelyTokenAddressLabel: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').isLikelyTokenAddressLabel
   const isObject: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').isObject
+  const isPlaceholderRouteSymbol: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').isPlaceholderRouteSymbol
+  const isTradeRouteNativeToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').isTradeRouteNativeToken
+  const isTradeRouteTerminalQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').isTradeRouteTerminalQuote
   const isUsableFlapDexPoolAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').isUsableFlapDexPoolAddress
   const loadContractAbi: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/useContractAbi').loadContractAbi
   const navigateToUrl: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites').navigateToUrl
@@ -97,6 +107,7 @@ declare global {
   const normalizeTokenAddressKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').normalizeTokenAddressKey
   const normalizeTokenPageTokenData: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').normalizeTokenPageTokenData
   const normalizeTokenStatTokenData: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').normalizeTokenStatTokenData
+  const normalizeTradeRouteToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').normalizeTradeRouteToken
   const normalizeTrenchesTokenData: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').normalizeTrenchesTokenData
   const parseCurrentUrl: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites').parseCurrentUrl
   const parseCurrentUrlFull: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites').parseCurrentUrlFull
@@ -107,11 +118,17 @@ declare global {
   const pickFiniteNumber: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickFiniteNumber
   const pickMaxFiniteNumber: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickMaxFiniteNumber
   const pickMaxPercentValue: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickMaxPercentValue
+  const planEvmTradeRoute: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').planEvmTradeRoute
+  const preferRouteTokenSymbol: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').preferRouteTokenSymbol
   const readCookingLastLaunch: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets').readCookingLastLaunch
+  const recoverUniswapV4PoolKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/uniswapV4PoolKey').recoverUniswapV4PoolKey
   const rememberCookingLastLaunch: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets').rememberCookingLastLaunch
   const resolveEnabledSolanaSwqosProviderTypes: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveEnabledSolanaSwqosProviderTypes
+  const resolveEvmTradeQuoteToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').resolveEvmTradeQuoteToken
   const resolveFlapPlatform: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').resolveFlapPlatform
   const resolveFlapPlatformByQuoteLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').resolveFlapPlatformByQuoteLineage
+  const resolveQuoteFromDexScreenerPool: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/officialPoolQuote').resolveQuoteFromDexScreenerPool
+  const resolveRouteTokenLabel: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').resolveRouteTokenLabel
   const resolveSingleEnabledSolanaTipProvider: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveSingleEnabledSolanaTipProvider
   const resolveSolanaTipConfig: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveSolanaTipConfig
   const resolveTokenLaunchpadPlatform: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').resolveTokenLaunchpadPlatform
@@ -171,7 +188,7 @@ declare global {
   export type { FlapAPI, FlapCoinApiResponse } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/FlapAPI'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/FlapAPI')
   // @ts-ignore
-  export type { GmgnAPI, MultiTokenInfoResponse, GmgnSearchTokenItem, GmgnTokenHolding, GmgnPageFetchRequest, TokenCandle, TokenCandlesResponse, ApiUrlParams, SwapOrderRequest, SwapOrderResponse, BuyOrderParams, SellOrderParams, TokenCandlesParams, DailyProfit, DailyProfitResponse, DailyProfitParams, TokenHoldingDetail, TokenHoldingDetailResponse } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/GmgnAPI'
+  export type { GmgnAPI, MultiTokenInfoResponse, GmgnSearchTokenItem, FlapQuoteSupportResult, GmgnTokenPoolFeeInfo, GmgnTokenHolding, GmgnPageFetchRequest, TokenCandle, TokenCandlesResponse, ApiUrlParams, SwapOrderRequest, SwapOrderResponse, BuyOrderParams, SellOrderParams, TokenCandlesParams, DailyProfit, DailyProfitResponse, DailyProfitParams, TokenHoldingDetail, TokenHoldingDetailResponse } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/GmgnAPI'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/GmgnAPI')
   // @ts-ignore
   export type { TokenAPI } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/TokenAPI'
@@ -192,9 +209,15 @@ declare global {
   export type { LaunchpadFamily } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily')
   // @ts-ignore
+  export type { EvmTradeRouteHopKind, EvmTradeRoutePlanHop, EvmTradeRoutePlan } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview'
+  import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview')
+  // @ts-ignore
   export type { SiteInfo } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites')
   // @ts-ignore
   export type { BroadcastErrorClass } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify')
+  // @ts-ignore
+  export type { UniswapV4PoolKey } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/uniswapV4PoolKey'
+  import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/uniswapV4PoolKey')
 }

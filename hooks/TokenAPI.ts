@@ -4,12 +4,14 @@ import DexScreenerAPI, { DexScreenerPair } from "./DexScreenerAPI";
 import { FlapTokenStateV7, FourmemeTokenInfo, TokenInfo } from "@/types/token";
 import { call } from "@/utils/messaging";
 import { parseEther } from "viem";
-import { chainNames, getChainIdByName } from "@/constants/chains";
+import { getChainIdByName, toGmgnChainName } from "@/constants/chains";
 import { ChainId } from "@/constants/chains/chainId";
 import { MEME_SUFFIXS } from "@/constants/meme";
-import { getSupportedLaunchpads, normalizeLaunchpadPlatform } from "@/constants/launchpad";
+import { getSupportedLaunchpads, isLongLaunchpadPlatform, isO1LaunchpadPlatform, normalizeLaunchpadPlatform } from "@/constants/launchpad";
 import { classifyFlapRoute, hasConfirmedFlapOuterRoute, hasNonTerminalFlapOuterQuote, isUsableFlapDexPoolAddress, normalizeFlapLaunchpadStatus, resolveFlapPlatform, resolveFlapPlatformByQuoteLineage } from "@/utils/flap";
 import { inferLaunchpadFamilyByAddress, resolveTokenLaunchpadPlatform } from "@/utils/launchpadFamily";
+import { preferRouteTokenSymbol } from "@/utils/quoteTokenLabels";
+import { isTradeRouteTerminalQuote } from "@/utils/tradeRouteTerminals";
 
 const FOUR_MEME_LIKE_LAUNCHPADS = new Set([
     'fourmeme',
@@ -110,6 +112,191 @@ export class TokenAPI {
         }
 
         return merged;
+    }
+
+    private static mergePonsEnrichedTokenInfo(base: TokenInfo | null | undefined, pons: TokenInfo | null | undefined): TokenInfo | null {
+        if (!base && !pons) return null;
+        if (!pons) return base ?? null;
+        if (!base) return pons;
+        return {
+            ...base,
+            ...pons,
+            chain: base.chain || pons.chain,
+            address: base.address || pons.address,
+            name: base.name || pons.name,
+            symbol: base.symbol || pons.symbol,
+            decimals: base.decimals || pons.decimals,
+            logo: base.logo || pons.logo,
+            website: base.website || pons.website,
+            twitterUrl: base.twitterUrl || pons.twitterUrl,
+            telegramUrl: base.telegramUrl || pons.telegramUrl,
+            gmgnUrl: base.gmgnUrl || pons.gmgnUrl,
+            launchpad: pons.launchpad || base.launchpad,
+            launchpad_platform: pons.launchpad_platform || base.launchpad_platform,
+            launchpad_status: pons.launchpad_status ?? base.launchpad_status,
+            launchpad_progress: pons.launchpad_progress ?? base.launchpad_progress,
+            quote_token: preferRouteTokenSymbol(pons.quote_token, base.quote_token) || pons.quote_token || base.quote_token,
+            quote_token_address: pons.quote_token_address || base.quote_token_address,
+            pool_pair: pons.pool_pair || base.pool_pair,
+            biggest_pool_address: base.biggest_pool_address || pons.biggest_pool_address,
+            dex_type: pons.dex_type || base.dex_type,
+            tokenPrice: base.tokenPrice ?? pons.tokenPrice,
+        };
+    }
+
+    private static mergeO1EnrichedTokenInfo(base: TokenInfo | null | undefined, o1: TokenInfo | null | undefined): TokenInfo | null {
+        if (!base && !o1) return null;
+        if (!o1) return base ?? null;
+        if (!base) return o1;
+        return {
+            ...base,
+            ...o1,
+            chain: base.chain || o1.chain,
+            address: base.address || o1.address,
+            name: base.name || o1.name,
+            symbol: base.symbol || o1.symbol,
+            decimals: base.decimals || o1.decimals,
+            logo: base.logo || o1.logo,
+            website: base.website || o1.website,
+            twitterUrl: base.twitterUrl || o1.twitterUrl,
+            telegramUrl: base.telegramUrl || o1.telegramUrl,
+            gmgnUrl: base.gmgnUrl || o1.gmgnUrl,
+            launchpad: o1.launchpad || base.launchpad,
+            launchpad_platform: o1.launchpad_platform || base.launchpad_platform,
+            launchpad_status: 1,
+            launchpad_progress: Math.max(Number(base.launchpad_progress || 0), Number(o1.launchpad_progress || 0), 1),
+            quote_token: preferRouteTokenSymbol(o1.quote_token, base.quote_token) || o1.quote_token || base.quote_token,
+            quote_token_address: o1.quote_token_address || base.quote_token_address,
+            pool_pair: o1.pool_pair || base.pool_pair,
+            biggest_pool_address: o1.biggest_pool_address || base.biggest_pool_address,
+            tpool_pool_address: o1.tpool_pool_address || base.tpool_pool_address,
+            dex_type: o1.dex_type || base.dex_type || 'UNISWAP_V4',
+            tokenPrice: base.tokenPrice ?? o1.tokenPrice,
+            totalSupply: base.totalSupply || o1.totalSupply,
+        };
+    }
+
+    private static mergeLongEnrichedTokenInfo(base: TokenInfo | null | undefined, longInfo: TokenInfo | null | undefined): TokenInfo | null {
+        if (!base && !longInfo) return null;
+        if (!longInfo) return base ?? null;
+        if (!base) return longInfo;
+        return {
+            ...base,
+            ...longInfo,
+            chain: base.chain || longInfo.chain,
+            address: base.address || longInfo.address,
+            name: base.name || longInfo.name,
+            symbol: base.symbol || longInfo.symbol,
+            decimals: base.decimals || longInfo.decimals,
+            logo: base.logo || longInfo.logo,
+            website: base.website || longInfo.website,
+            twitterUrl: base.twitterUrl || longInfo.twitterUrl,
+            telegramUrl: base.telegramUrl || longInfo.telegramUrl,
+            gmgnUrl: base.gmgnUrl || longInfo.gmgnUrl,
+            launchpad: longInfo.launchpad || base.launchpad,
+            launchpad_platform: longInfo.launchpad_platform || base.launchpad_platform,
+            // Keep GMGN epoch progress; routing treats long as outer V4 regardless.
+            launchpad_status: base.launchpad_status ?? longInfo.launchpad_status,
+            launchpad_progress: Math.max(Number(base.launchpad_progress || 0), Number(longInfo.launchpad_progress || 0)),
+            quote_token: preferRouteTokenSymbol(longInfo.quote_token, base.quote_token) || longInfo.quote_token || base.quote_token,
+            quote_token_address: longInfo.quote_token_address || base.quote_token_address,
+            pool_pair: longInfo.pool_pair || base.pool_pair,
+            biggest_pool_address: longInfo.biggest_pool_address || base.biggest_pool_address,
+            tpool_pool_address: longInfo.tpool_pool_address || base.tpool_pool_address,
+            dex_type: longInfo.dex_type || base.dex_type || 'UNISWAP_V4',
+            tokenPrice: base.tokenPrice ?? longInfo.tokenPrice,
+            totalSupply: base.totalSupply || longInfo.totalSupply,
+        };
+    }
+
+    private static async getTokenInfoByPons(chain: string, address: string): Promise<TokenInfo | null> {
+        const res = await call({
+            type: 'token:getTokenInfo:pons',
+            chainId: getChainIdByName(chain) || ChainId.RH,
+            tokenAddress: address as `0x${string}`,
+        } as any) as { tokenInfo: TokenInfo | null };
+        return res.tokenInfo ?? null;
+    }
+
+    private static async getTokenInfoByO1(chain: string, address: string, seed?: TokenInfo | null): Promise<TokenInfo | null> {
+        const res = await call({
+            type: 'token:getTokenInfo:o1',
+            chainId: getChainIdByName(chain) || ChainId.RH,
+            tokenAddress: address as `0x${string}`,
+            tokenInfo: seed ?? null,
+        } as any) as { tokenInfo: TokenInfo | null };
+        return res.tokenInfo ?? null;
+    }
+
+    private static async getTokenInfoByLong(chain: string, address: string, seed?: TokenInfo | null): Promise<TokenInfo | null> {
+        const res = await call({
+            type: 'token:getTokenInfo:long',
+            chainId: getChainIdByName(chain) || ChainId.RH,
+            tokenAddress: address as `0x${string}`,
+            tokenInfo: seed ?? null,
+        } as any) as { tokenInfo: TokenInfo | null };
+        return res.tokenInfo ?? null;
+    }
+
+    private static rhLaunchpadEnrichInFlight = new Map<string, Promise<TokenInfo | null>>();
+
+    private static isRhPonsPlatform(platform: string): boolean {
+        const value = String(platform || '').trim().toLowerCase();
+        return value === 'pons' || value.startsWith('pons_');
+    }
+
+    private static async enrichRhTokenInfoForRoute(
+        key: string,
+        chain: string,
+        address: string,
+        seed: TokenInfo,
+        platformNow?: string,
+    ): Promise<TokenInfo> {
+        const existing = this.rhLaunchpadEnrichInFlight.get(key);
+        if (existing) return (await existing) ?? seed;
+        const task = (async (): Promise<TokenInfo | null> => {
+            let current = seed;
+            const platform = resolveTokenLaunchpadPlatform({
+                address,
+                launchpad: seed.launchpad,
+                launchpad_platform: seed.launchpad_platform,
+                requestedPlatform: platformNow,
+            }) || String(platformNow || '').trim().toLowerCase();
+            try {
+                if (isO1LaunchpadPlatform(platform)) {
+                    const o1Info = await this.getTokenInfoByO1(chain, address, current).catch(() => null);
+                    if (o1Info) current = this.mergeO1EnrichedTokenInfo(current, o1Info) ?? current;
+                } else if (isLongLaunchpadPlatform(platform)) {
+                    const longInfo = await this.getTokenInfoByLong(chain, address, current).catch(() => null);
+                    if (longInfo) current = this.mergeLongEnrichedTokenInfo(current, longInfo) ?? current;
+                } else if (this.isRhPonsPlatform(platform)) {
+                    const ponsInfo = await this.getTokenInfoByPons(chain, address).catch(() => null);
+                    if (ponsInfo) current = this.mergePonsEnrichedTokenInfo(current, ponsInfo) ?? current;
+                }
+                if (!String(current.quote_token_address || '').trim()) {
+                    const dex = await this.buildDexTokenInfoFromDexScreener(chain, address).catch(() => null);
+                    if (dex?.quote_token_address) {
+                        current = {
+                            ...current,
+                            quote_token: current.quote_token || dex.quote_token,
+                            quote_token_address: dex.quote_token_address,
+                            pool_pair: current.pool_pair || dex.pool_pair,
+                            biggest_pool_address: current.biggest_pool_address || dex.biggest_pool_address,
+                            tpool_pool_address: current.tpool_pool_address || dex.tpool_pool_address,
+                            dex_type: current.dex_type || dex.dex_type,
+                        };
+                    }
+                }
+            } catch {
+            }
+            return current;
+        })();
+        this.rhLaunchpadEnrichInFlight.set(key, task);
+        try {
+            return (await task) ?? seed;
+        } finally {
+            this.rhLaunchpadEnrichInFlight.delete(key);
+        }
     }
 
     private static prewarmFlapEnrichedTokenInfo(
@@ -300,6 +487,9 @@ export class TokenAPI {
     private static mapDexScreenerPairDexType(pair: DexScreenerPair | null | undefined): string | undefined {
         if (!pair) return undefined;
         const labels = Array.isArray(pair.labels) ? pair.labels.map((item) => String(item).toLowerCase()) : [];
+        if (labels.some((item) => item.includes('v4'))) {
+            return 'UNISWAP_V4';
+        }
         if (labels.some((item) => item.includes('v3') || item.includes('cl'))) {
             return 'PANCAKE_SWAP_V3';
         }
@@ -315,9 +505,10 @@ export class TokenAPI {
             .filter((pair) => {
                 const base = String(pair.baseToken?.address || '').toLowerCase();
                 const quote = String(pair.quoteToken?.address || '').toLowerCase();
-                return base === tokenLower || quote === tokenLower;
+                return (base === tokenLower || quote === tokenLower)
+                    && DexScreenerAPI.effectiveLiquidityUsd(pair) > 0;
             })
-            .sort((a, b) => Number(b.liquidity?.usd ?? 0) - Number(a.liquidity?.usd ?? 0))[0];
+            .sort((a, b) => DexScreenerAPI.effectiveLiquidityUsd(b) - DexScreenerAPI.effectiveLiquidityUsd(a))[0];
         if (!selected?.pairAddress) return null;
 
         const baseAddress = String(selected.baseToken?.address || '');
@@ -493,6 +684,21 @@ export class TokenAPI {
                     tokenAddress: tokenAddress as `0x${string}`,
                 } as any) as { tokenInfo: TokenInfo | null };
                 nextValue = res.tokenInfo;
+            } else if (platform === 'pons' || platform === 'pons_v1' || platform === 'pons_v2') {
+                nextValue = await this.getTokenInfoByPons(chain, tokenAddress).catch(() => null);
+                if (nextValue == null) {
+                    nextValue = await this.buildDexTokenInfoFromDexScreener(chain, tokenAddress);
+                }
+            } else if (isO1LaunchpadPlatform(platform)) {
+                nextValue = await this.getTokenInfoByO1(chain, tokenAddress).catch(() => null);
+                if (nextValue == null) {
+                    nextValue = await this.buildDexTokenInfoFromDexScreener(chain, tokenAddress);
+                }
+            } else if (isLongLaunchpadPlatform(platform)) {
+                nextValue = await this.getTokenInfoByLong(chain, tokenAddress).catch(() => null);
+                if (nextValue == null) {
+                    nextValue = await this.buildDexTokenInfoFromDexScreener(chain, tokenAddress);
+                }
             } else {
                 let address = tokenAddress;
                 const suffixLaunchpadFamily = inferLaunchpadFamilyByAddress(address);
@@ -574,7 +780,8 @@ export class TokenAPI {
                             } else if (
                                 MEME_SUFFIXS.includes(address.substring(address.length - 4)) ||
                                 isFourMemeLike ||
-                                isSupportedLaunchpad
+                                isSupportedLaunchpad ||
+                                chainId === ChainId.RH
                             ) {
                                 nextValue = tokenInfo;
                                 if (parallelFlapInfoPromise) {
@@ -597,6 +804,25 @@ export class TokenAPI {
                     }
                 }
 
+                if (getChainIdByName(chain) === ChainId.RH && nextValue) {
+                    const platformNow = resolveTokenLaunchpadPlatform({
+                        address,
+                        launchpad: nextValue.launchpad,
+                        launchpad_platform: nextValue.launchpad_platform,
+                        requestedPlatform: normalizedRequestedPlatform,
+                    });
+                    const hasQuote = /^0x[a-fA-F0-9]{40}$/.test(String(nextValue.quote_token_address || '').trim());
+                    if (hasQuote) {
+                        void this.enrichRhTokenInfoForRoute(key, chain, address, nextValue, platformNow)
+                            .then((enriched) => {
+                                if (enriched) this.tokenInfoCache.set(key, { ts: Date.now(), value: enriched });
+                            })
+                            .catch(() => undefined);
+                    } else {
+                        nextValue = await this.enrichRhTokenInfoForRoute(key, chain, address, nextValue, platformNow);
+                    }
+                }
+
                 if (nextValue == null) {
                     if (FLAP_LIKE_LAUNCHPADS.has(normalizedRequestedPlatform) || suffixLaunchpadFamily === 'flap') {
                         nextValue = await this.getTokenInfoByFlap(platform, chain, address);
@@ -606,6 +832,9 @@ export class TokenAPI {
                         nextValue = await this.buildDexTokenInfoFromDexScreener(chain, address);
                     }
                 }
+            }
+            if (nextValue && getChainIdByName(chain) === ChainId.BNB) {
+                nextValue = await this.applyFourmemeOfficialQuote(chain, tokenAddress, nextValue);
             }
             this.tokenInfoCache.set(key, { ts: Date.now(), value: nextValue });
             if (shouldDebugAltfun) {
@@ -695,6 +924,44 @@ export class TokenAPI {
 
     static async getTokenHolding(platform: string, chain: string, walletAddress: string, tokenAddress: string, opts?: { cacheTtlMs?: number }): Promise<string | null> {
         return await this.getBalance(platform, chain, walletAddress, tokenAddress, opts);
+    }
+
+    private static isUsableFourmemeOfficialQuote(
+        chainId: number,
+        tokenAddress: string,
+        quote?: string | null,
+        version?: number | null,
+    ): quote is `0x${string}` {
+        if (!(Number(version) > 0)) return false;
+        if (!/^0x[a-fA-F0-9]{40}$/.test(String(quote || ''))) return false;
+        const lower = quote.toLowerCase();
+        if (lower === tokenAddress.toLowerCase()) return false;
+        if (lower === '0x0000000000000000000000000000000000000000') return false;
+        return !isTradeRouteTerminalQuote(chainId, quote);
+    }
+
+    private static async applyFourmemeOfficialQuote(
+        chain: string,
+        address: string,
+        tokenInfo: TokenInfo,
+    ): Promise<TokenInfo> {
+        const chainId = getChainIdByName(chain);
+        if (chainId !== ChainId.BNB) return tokenInfo;
+        const declared = String(tokenInfo.quote_token_address || '').trim();
+        if (/^0x[a-fA-F0-9]{40}$/.test(declared)
+            && declared.toLowerCase() !== address.toLowerCase()
+            && declared.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
+            return tokenInfo;
+        }
+        const contractInfo = await this.getTokenInfoByFourmemeContract(chain, address).catch(() => null);
+        const quote = contractInfo?.quote;
+        if (!this.isUsableFourmemeOfficialQuote(chainId, address, quote, contractInfo?.version)) {
+            return tokenInfo;
+        }
+        return {
+            ...tokenInfo,
+            quote_token_address: quote,
+        };
     }
 
     static async getTokenInfoByFourmemeContract(chain: string, address: string): Promise<FourmemeTokenInfo | null> {
@@ -889,6 +1156,27 @@ export class TokenAPI {
         return httpInfo;
     }
 
+    static async previewQuickTradeRoute(input: {
+        chainId: number;
+        tokenAddress: string;
+        tokenInfo?: TokenInfo | null;
+        baseTokenAddress?: string;
+    }) {
+        if (!input.tokenAddress || !input.tokenInfo || input.chainId === ChainId.SOL || input.chainId === ChainId.HYPER) {
+            return null;
+        }
+        const res = await call({
+            type: 'trade:previewRoute',
+            input: {
+                chainId: input.chainId,
+                tokenAddress: input.tokenAddress,
+                tokenInfo: input.tokenInfo ?? undefined,
+                baseTokenAddress: input.baseTokenAddress,
+            },
+        });
+        return res.route ?? null;
+    }
+
     static async getPoolPair(chain: string, address: string): Promise<{ token0: string; token1: string } | null> {
         const chainId = getChainIdByName(chain);
         const res = await call({
@@ -914,7 +1202,7 @@ export class TokenAPI {
         try {
             // Try to get price from GMGN
             const res = platform === 'gmgn'
-                ? await GmgnAPI.getTokenPrice(chainNames[chainId], tokenAddress)
+                ? await GmgnAPI.getTokenPrice(toGmgnChainName(chainId), tokenAddress)
                 : null;
             if (res?.price) {
                 const gmgnPrice = Number(res.price);

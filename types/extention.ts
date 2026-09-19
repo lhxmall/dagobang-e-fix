@@ -846,6 +846,31 @@ export type TradeTurboPrewarmInput = {
   fromAddress?: ChainAddress;
   submitChannel?: SubmitChannel;
   platform?: string;
+  baseTokenAddress?: ChainAddress;
+};
+
+export type QuickTradeRouteHop = {
+  tokenIn: string;
+  tokenOut: string;
+  tokenInSymbol: string;
+  tokenOutSymbol: string;
+  dexLabel: string;
+  poolAddress?: string | null;
+  fee?: number | null;
+  liquidityUsd?: number | null;
+};
+
+export type QuickTradeRoutePreview = {
+  buyLabel: string;
+  sellLabel: string;
+  hops: QuickTradeRouteHop[];
+};
+
+export type TradePreviewRouteInput = {
+  chainId: number;
+  tokenAddress: ChainAddress;
+  tokenInfo?: TokenInfo;
+  baseTokenAddress?: ChainAddress;
 };
 
 export type BgRequest =
@@ -881,6 +906,9 @@ export type BgRequest =
   | { type: 'token:getTokenInfo:fourmeme'; chainId: number; tokenAddress: `0x${string}` }
   | { type: 'token:getTokenInfo:flap'; chainId: number; tokenAddress: `0x${string}` }
   | { type: 'token:getTokenInfo:altfun'; chainId: number; tokenAddress: `0x${string}` }
+  | { type: 'token:getTokenInfo:pons'; chainId: number; tokenAddress: `0x${string}` }
+  | { type: 'token:getTokenInfo:o1'; chainId: number; tokenAddress: `0x${string}`; tokenInfo?: TokenInfo | null }
+  | { type: 'token:getTokenInfo:long'; chainId: number; tokenAddress: `0x${string}`; tokenInfo?: TokenInfo | null }
   | { type: 'token:getTokenInfo:fourmemeHttp'; platform: string; chain: string; address: ChainAddress }
   | { type: 'token:getTokenInfo:flapHttp'; platform: string; chain: string; address: ChainAddress }
   | {
@@ -934,12 +962,48 @@ export type BgRequest =
       telegramUrl?: string;
       fromAddress?: ChainAddress;
       quoteTokenId: string;
+      customQuoteToken?: {
+        address: ChainAddress;
+        symbol: string;
+        name: string;
+        decimals: number;
+        iconSrc?: string;
+      };
       quoteAmount?: string;
       taxMode: 'quote' | 'self' | 'custom' | 'stocks' | 'disabled';
       customDividendTokenAddress?: ChainAddress;
       selectedStockSymbols?: string[];
       buyTaxRateBps?: number;
       sellTaxRateBps?: number;
+      autoSell?: CookingAutoSellInput;
+    };
+  }
+  | { type: 'token:getOpenFourTemplate'; mode?: '4stock' }
+  | {
+    type: 'token:createOpenFour';
+    input: {
+      launchFlowId?: string;
+      mode?: '4stock';
+      name: string;
+      symbol: string;
+      desc: string;
+      imgUrl: string;
+      imgFallbackUrls?: string[];
+      webUrl?: string;
+      twitterUrl?: string;
+      telegramUrl?: string;
+      fromAddress?: ChainAddress;
+      quoteAmount?: string;
+      antiSniperEnabled?: boolean;
+      taxEnabled?: boolean;
+      buyTaxBps?: number;
+      sellTaxBps?: number;
+      taxAlloc?: {
+        founder?: number;
+        burn?: number;
+        holder?: number;
+        liquidity?: number;
+      };
       autoSell?: CookingAutoSellInput;
     };
   }
@@ -952,6 +1016,7 @@ export type BgRequest =
   | { type: 'rpc:capacityProbe'; chainId: number; mode?: 'request' | 'force' }
   | { type: 'rpc:resetProfiles'; chainId: number; urls?: string[] }
   | { type: 'trade:prewarmTurbo'; input: TradeTurboPrewarmInput }
+  | { type: 'trade:previewRoute'; input: TradePreviewRouteInput }
   | { type: 'trade:refreshNonce'; input: { chainId: number; fromAddress?: ChainAddress } }
   | { type: 'tx:buy'; input: TxBuyInput }
   | { type: 'tx:buyWithReceiptAuto'; input: TxBuyInput }
@@ -1111,6 +1176,12 @@ export type BgResponse<T extends BgRequest> = T extends { type: 'bg:ping' }
   ? ({ ok: true } & FlapTokenStateV7)
   : T extends { type: 'token:getTokenInfo:altfun' }
   ? { ok: true; tokenInfo: TokenInfo | null }
+  : T extends { type: 'token:getTokenInfo:pons' }
+  ? { ok: true; tokenInfo: TokenInfo | null }
+  : T extends { type: 'token:getTokenInfo:o1' }
+  ? { ok: true; tokenInfo: TokenInfo | null }
+  : T extends { type: 'token:getTokenInfo:long' }
+  ? { ok: true; tokenInfo: TokenInfo | null }
   : T extends { type: 'token:getTokenInfo:fourmemeHttp' }
   ? { ok: true; tokenInfo: TokenInfo | null }
   : T extends { type: 'token:getTokenInfo:flapHttp' }
@@ -1133,6 +1204,34 @@ export type BgResponse<T extends BgRequest> = T extends { type: 'bg:ping' }
     data?: {
       txHash: `0x${string}`;
       tokenAddress: `0x${string}` | null;
+    };
+    autoSell?: CookingAutoSellResult;
+  }
+  : T extends { type: 'token:getOpenFourTemplate' }
+  ? {
+    ok: true;
+    template: {
+      mode: '4stock';
+      templateId: string;
+      name: string;
+      tag: string;
+      descr: string;
+      quoteSymbol: string;
+      quoteAddress: string;
+      quoteDecimals: number;
+      raisedAmount: string;
+      saleAmount: string;
+      totalSupply: string;
+      createFee: string;
+    };
+  }
+  : T extends { type: 'token:createOpenFour' }
+  ? {
+    ok: true;
+    data?: {
+      txHash: `0x${string}`;
+      tokenAddress: `0x${string}` | null;
+      templateId?: string;
     };
     autoSell?: CookingAutoSellResult;
   }
@@ -1188,7 +1287,9 @@ export type BgResponse<T extends BgRequest> = T extends { type: 'bg:ping' }
   : T extends { type: 'rpc:resetProfiles' }
   ? { ok: true }
   : T extends { type: 'trade:prewarmTurbo' }
-  ? { ok: true }
+  ? { ok: true; route: QuickTradeRoutePreview | null }
+  : T extends { type: 'trade:previewRoute' }
+  ? { ok: true; route: QuickTradeRoutePreview | null }
   : T extends { type: 'trade:refreshNonce' }
   ? { ok: true }
   : T extends { type: 'tx:approve' }

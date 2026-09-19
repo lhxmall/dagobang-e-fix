@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Zap, Fuel, Sliders, Settings2 } from 'lucide-react';
 import { ChainId } from '@/constants/chains/chainId';
 import { getNativeSymbol } from '@/constants/chains/runtime';
-import type { AdvancedAutoSellConfig, QuickBuyPresetOverride, Settings } from '@/types/extention';
+import type { AdvancedAutoSellConfig, QuickBuyPresetOverride, QuickTradeRouteHop, Settings } from '@/types/extention';
 import { SymbolCoinIcon } from '@/components/Coins';
 import { formatPriceValue } from '@/utils/format';
 import { t, type Locale } from '@/utils/i18n';
@@ -14,6 +14,7 @@ import {
 import { AutoSell } from './AutoSell';
 import { getDynamicGasPreview } from './useDynamicGasPreview';
 import { ChannelSwitcher, type ChannelSwitcherItem } from './ChannelSwitcher';
+import { RoutePreviewHint } from './RoutePreviewHint';
 
 type BuySectionProps = {
   formattedNativeBalance: string;
@@ -24,6 +25,8 @@ type BuySectionProps = {
   tokenPriceUsd: number | null;
   tokenSymbol: string | null;
   previewRouteLabel: string | null;
+  previewRouteHops?: QuickTradeRouteHop[] | null;
+  previewRouteLoading?: boolean;
   isAltfunLayout?: boolean;
   busy: boolean;
   isUnlocked: boolean;
@@ -70,6 +73,8 @@ export function BuySection({
   tokenPriceUsd,
   tokenSymbol,
   previewRouteLabel,
+  previewRouteHops,
+  previewRouteLoading = false,
   isAltfunLayout = false,
   busy,
   isUnlocked,
@@ -148,7 +153,7 @@ export function BuySection({
   const isSolana = settings?.chainId === ChainId.SOL;
   const priorityFeeUiLabel = 'PF';
   const currentSubmitChannel = chainSettings?.submitChannel ?? 'protectRpcs';
-  const showPriorityFee = settings?.chainId !== ChainId.HYPER && (isSolana || (currentSubmitChannel !== 'protectRpcs' && currentSubmitChannel !== 'mixed'));
+  const showPriorityFee = settings?.chainId !== ChainId.HYPER && settings?.chainId !== ChainId.RH && (isSolana || (currentSubmitChannel !== 'protectRpcs' && currentSubmitChannel !== 'mixed'));
   const enabledTipProviders = Array.isArray(chainSettings?.solanaSwqos?.providers)
     ? chainSettings!.solanaSwqos!.providers.filter((item) => item?.enabled)
     : [];
@@ -425,7 +430,6 @@ export function BuySection({
 
       <div
         className={`mb-1.5 border-emerald-500/10 bg-emerald-500/[0.04] text-zinc-400 ${isAltfunLayout ? 'px-2.5 py-1 text-[12px]' : 'px-2 py-1 text-[11px]'}`}
-        title={previewRouteLabel || undefined}
       >
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 truncate">
@@ -436,6 +440,7 @@ export function BuySection({
               ≈ {formatUsd(activePreviewUsd)}
             </span>
           </div>
+          <RoutePreviewHint label={previewRouteLabel} hops={previewRouteHops} loading={previewRouteLoading} tone="buy" locale={locale} />
           <div className="min-w-0 truncate text-right text-emerald-300/85">
             ≈ {formatAmount(activePreviewTokens)} {tokenSymbol || t('contentUi.common.token', locale)}
           </div>

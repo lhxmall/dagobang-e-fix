@@ -9,7 +9,7 @@ const STATE_CHANGE_REFRESH_DEBOUNCE_MS = 300;
 export default defineContentScript({
   matches: ['*://gmgn.ai/*', '*://*.gmgn.ai/*', '*://axiom.trade/*', '*://*.axiom.trade/*', '*://web3.binance.com/*',
     "*://web3.okx.com/*", "*://xxyy.io/*", "*://*.xxyy.io/*", "*://dexscreener.com/*", "*://*.dexscreener.com/*",
-    "*://four.meme/*", "*://*.four.meme/*", "*://alt.fun/*", "*://*.alt.fun/*", "*://flap.sh/*", "*://*.flap.sh/*", "*://debot.ai/*", "*://*.debot.ai/*",
+    "*://four.meme/*", "*://*.four.meme/*", "*://alt.fun/*", "*://*.alt.fun/*", "*://ponsfamily.com/*", "*://*.ponsfamily.com/*", "*://pons.fun/*", "*://*.pons.fun/*", "*://flap.sh/*", "*://*.flap.sh/*", "*://debot.ai/*", "*://*.debot.ai/*",
   ],
   allFrames: true,
   runAt: 'document_start',
@@ -201,6 +201,22 @@ export default defineContentScript({
             return { ok: true };
           } catch (error: any) {
             return { ok: false, error: String(error?.message || error || 'gmgn_unfollow_tokens_failed') };
+          }
+        })();
+      }
+      if (message.type === 'bg:gmgn:pageTokenPoolFeeInfo') {
+        return (async () => {
+          if (!isGmgnHost) return { ok: false, error: 'not_gmgn_page' };
+          try {
+            const chain = typeof message?.chain === 'string' ? message.chain : 'bsc';
+            const tokenAddress = typeof message?.tokenAddress === 'string' ? message.tokenAddress.trim() : '';
+            if (!tokenAddress) return { ok: false, error: 'invalid_token' };
+            const request = await GmgnAPI.buildTokenPoolFeeInfoPageRequest(chain, tokenAddress);
+            const payload = await requestGmgnPageFetch(request);
+            const list = GmgnAPI.parseTokenPoolFeeInfoPayload(payload);
+            return { ok: true, list };
+          } catch (error: any) {
+            return { ok: false, error: String(error?.message || error || 'gmgn_token_pool_fee_info_failed') };
           }
         })();
       }

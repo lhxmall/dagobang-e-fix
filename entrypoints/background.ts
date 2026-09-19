@@ -20,10 +20,14 @@ import { createLimitOrderExecutor, tickLimitOrdersForToken } from '@/services/li
 import type { BgRequest, GmgnTokenSnapshot, LimitOrderScanStatus, NewPoolMonitorUiDetail, SubmitChannel, TxSellInput, UnifiedMarketSignalSource } from '@/types/extention';
 import { TokenFourmemeService } from '@/services/token/fourmeme';
 import { TokenFlapLaunchService } from '@/services/token/flapLaunch';
+import { TokenOpenFourLaunchService } from '@/services/token/openfourLaunch';
 import { TokenFlapService } from '@/services/token/flap';
 import { TokenAltfunService } from '@/services/token/altfun';
+import { TokenPonsService } from '@/services/token/pons';
+import { TokenO1Service } from '@/services/token/o1';
+import { TokenLongService } from '@/services/token/long';
 import FourmemeAPI from '@/services/api/fourmeme';
-import { chainNames, getChainIdByName } from '@/constants/chains';
+import { chainNames, getChainIdByName, toGmgnChainName } from '@/constants/chains';
 import { ChainId } from '@/constants/chains/chainId';
 import BloxRouterAPI from '@/services/api/bloxRouter';
 import { encodeFunctionData, isAddress, parseAbi, parseEther, parseUnits } from 'viem';
@@ -75,7 +79,7 @@ export default defineBackground(() => {
   const GMGN_TOKEN_SNAPSHOT_PERSIST_DEBOUNCE_MS = 8000;
   const NEWPOOL_MONITOR_CACHE_LIMIT = 800;
   const NEWPOOL_MONITOR_BROADCAST_MS = 16;
-  const GMGN_LIMIT_ORDER_CHAIN_IDS = new Set<number>([ChainId.ETH, ChainId.BNB, ChainId.SOL]);
+  const GMGN_LIMIT_ORDER_CHAIN_IDS = new Set<number>([ChainId.ETH, ChainId.BNB, ChainId.SOL, ChainId.RH]);
   const parseEip7702Delegation = (code: string | null | undefined): { delegated: boolean; delegateAddress?: `0x${string}`; code: `0x${string}` } => {
     const normalized = (typeof code === 'string' && code.startsWith('0x') ? code.toLowerCase() : '0x') as `0x${string}`;
     if (!normalized.startsWith(EIP7702_DELEGATION_PREFIX) || normalized.length < 2 + 6 + 40) {
@@ -592,7 +596,7 @@ export default defineBackground(() => {
     settings?.ui?.gmgnLimitOrderPriceEnabled === true;
   const resolveGmgnLimitOrderChain = (chainId: number): string | null => {
     if (!GMGN_LIMIT_ORDER_CHAIN_IDS.has(chainId)) return null;
-    const chain = String(chainNames[chainId] || '').trim().toLowerCase();
+    const chain = toGmgnChainName(chainId);
     return chain || null;
   };
   const requestGmgnFollowTokensFromContent = async (
@@ -678,6 +682,30 @@ export default defineBackground(() => {
       tokenAddress: input.tokenAddress,
       groupId: 'default',
     }]);
+  };
+  const syncGmgnFollowForOpenLimitOrders = async () => {
+    const settings = await SettingsService.get().catch(() => null);
+    if (!isGmgnLimitOrderPriceEnabled(settings)) return;
+    const orders = await getLimitOrders().catch(() => [] as Awaited<ReturnType<typeof getLimitOrders>>);
+    const byChain = new Map<number, Set<string>>();
+    for (const order of orders) {
+      if (order.status !== 'open' && order.status !== 'triggered') continue;
+      if (!GMGN_LIMIT_ORDER_CHAIN_IDS.has(order.chainId)) continue;
+      const tokenKey = normalizeTokenAddressKey(order.tokenAddress);
+      if (!tokenKey) continue;
+      const set = byChain.get(order.chainId) ?? new Set<string>();
+      set.add(String(order.tokenAddress).trim());
+      byChain.set(order.chainId, set);
+    }
+    for (const [chainId, tokens] of byChain.entries()) {
+      const chain = resolveGmgnLimitOrderChain(chainId);
+      if (!chain || tokens.size <= 0) continue;
+      await requestGmgnFollowTokensFromContent(
+        'follow',
+        chain,
+        Array.from(tokens).map((tokenAddress) => ({ tokenAddress, groupId: 'default' })),
+      ).catch(() => { });
+    }
   };
   const maybeUnfollowGmgnForLimitOrder = async (input: {
     chainId: number;
@@ -1104,6 +1132,7 @@ export default defineBackground(() => {
     },
   });
   limitOrderScanner.start();
+  void syncGmgnFollowForOpenLimitOrders().catch(() => { });
 
   const createCookingAutoSellIfEnabled = async (input: {
     enabled?: boolean;
@@ -1557,6 +1586,15 @@ export default defineBackground(() => {
           case 'token:getTokenInfo:altfun':
             return { ok: true, tokenInfo: await TokenAltfunService.getTokenInfo(msg.chainId, msg.tokenAddress) };
 
+          case 'token:getTokenInfo:pons':
+            return { ok: true, tokenInfo: await TokenPonsService.getTokenInfo(msg.chainId, msg.tokenAddress) };
+
+          case 'token:getTokenInfo:o1':
+            return { ok: true, tokenInfo: await TokenO1Service.getTokenInfo(msg.chainId, msg.tokenAddress, msg.tokenInfo) };
+
+          case 'token:getTokenInfo:long':
+            return { ok: true, tokenInfo: await TokenLongService.getTokenInfo(msg.chainId, msg.tokenAddress, msg.tokenInfo) };
+
           case 'token:getTokenInfo:fourmemeHttp': {
             const tokenInfo = await FourmemeAPI.getTokenInfo(msg.chain, msg.address);
             return { ok: true, tokenInfo };
@@ -1734,6 +1772,12 @@ export default defineBackground(() => {
                 ...msg.input,
                 launchFlowId: flowId,
                 fromAddress,
+                customQuoteToken: (msg.input.customQuoteToken && isAddress(msg.input.customQuoteToken.address))
+                  ? {
+                    ...msg.input.customQuoteToken,
+                    address: msg.input.customQuoteToken.address as `0x${string}`,
+                  }
+                  : undefined,
                 customDividendTokenAddress: (msg.input.customDividendTokenAddress && isAddress(msg.input.customDividendTokenAddress))
                   ? (msg.input.customDividendTokenAddress as `0x${string}`)
                   : undefined,
@@ -1779,6 +1823,76 @@ export default defineBackground(() => {
                 status: 'error',
                 stage: 'launch_confirmed',
                 message: String(error?.message || 'Flap 发射失败'),
+              });
+              throw error;
+            }
+          }
+
+          case 'token:getOpenFourTemplate': {
+            const template = TokenOpenFourLaunchService.getTemplate(msg.mode || '4stock');
+            return { ok: true, template };
+          }
+
+          case 'token:createOpenFour': {
+            const flowId = String(msg.input.launchFlowId || '').trim() || `openfour:${Date.now().toString(36)}`;
+            try {
+              await broadcastCookingLaunchEvent({
+                flowId,
+                platform: 'openfour',
+                status: 'progress',
+                stage: 'prepare',
+                message: 'OpenFour 发射流程已开始',
+              });
+              const fromAddress = (msg.input.fromAddress && isAddress(msg.input.fromAddress))
+                ? (msg.input.fromAddress as `0x${string}`)
+                : undefined;
+              const data = await TokenOpenFourLaunchService.createToken({
+                ...msg.input,
+                launchFlowId: flowId,
+                fromAddress,
+              }, {
+                onProgress: async (event) => {
+                  await broadcastCookingLaunchEvent({
+                    flowId,
+                    platform: 'openfour',
+                    status: 'progress',
+                    ...event,
+                  });
+                },
+              });
+              const launchWallet = data.fromAddress || fromAddress;
+              const autoSell = await createCookingAutoSellIfEnabled({
+                enabled: msg.input.autoSell?.enabled,
+                tokenAddress: data.tokenAddress,
+                fromAddress: launchWallet,
+                name: msg.input.name,
+                symbol: msg.input.symbol,
+                imgUrl: msg.input.imgUrl,
+                launchpad: 'openfour',
+                quoteToken: msg.input.autoSell?.quoteToken || 'BNC4',
+                rules: msg.input.autoSell?.rules,
+              });
+              await broadcastCookingLaunchEvent({
+                flowId,
+                platform: 'openfour',
+                status: 'success',
+                stage: 'launch_confirmed',
+                message: data.tokenAddress
+                  ? `OpenFour 发射成功：${data.tokenAddress.slice(0, 6)}...${data.tokenAddress.slice(-4)}`
+                  : 'OpenFour 发射成功',
+                txHash: data.txHash,
+                tokenAddress: data.tokenAddress,
+                fromAddress: launchWallet,
+                autoSell: autoSell ?? undefined,
+              });
+              return { ok: true, data, autoSell: autoSell ?? undefined };
+            } catch (error: any) {
+              await broadcastCookingLaunchEvent({
+                flowId,
+                platform: 'openfour',
+                status: 'error',
+                stage: 'launch_confirmed',
+                message: String(error?.message || 'OpenFour 发射失败'),
               });
               throw error;
             }
@@ -1886,6 +2000,11 @@ export default defineBackground(() => {
                 fromAddress: order.fromAddress,
               });
             }
+            // Same as BSC: follow on GMGN so token_stat WS pushes feed limit-order prices.
+            void ensureGmgnFollowForLimitOrder({
+              chainId: order.chainId,
+              tokenAddress: order.tokenAddress,
+            }).catch(() => { });
             broadcastStateChange();
             limitOrderScanner?.scheduleFromStorage().catch(() => { });
             return { ok: true, order };
@@ -1977,10 +2096,19 @@ export default defineBackground(() => {
           case 'trade:prewarmTurbo': {
             if (msg.input.chainId === ChainId.SOL) {
               await ensureSolanaTradePrewarm(msg.input);
-            } else {
-              await getTrade(msg.input.chainId).prewarmTurbo(msg.input);
+              return { ok: true, route: null };
             }
-            return { ok: true };
+            const route = await getTrade(msg.input.chainId).prewarmTurbo(msg.input);
+            return { ok: true, route: route ?? null };
+          }
+
+          case 'trade:previewRoute': {
+            try {
+              const route = await getTrade(msg.input.chainId).previewQuickTradeRoute(msg.input);
+              return { ok: true, route };
+            } catch {
+              return { ok: true, route: null };
+            }
           }
 
           case 'trade:refreshNonce': {

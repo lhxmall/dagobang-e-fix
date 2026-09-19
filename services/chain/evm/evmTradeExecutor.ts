@@ -1,13 +1,23 @@
 import { TradeService } from '@/services/trade';
-import type { TradeTurboPrewarmInput } from '@/types/extention';
+import type { TradePreviewRouteInput, TradeTurboPrewarmInput } from '@/types/extention';
 import type { TradeExecutor } from '../types';
 
 export class EvmTradeExecutor implements TradeExecutor {
   async prewarmTurbo(input: TradeTurboPrewarmInput) {
-    await TradeService.prewarmTurbo({
+    return await TradeService.prewarmTurbo({
       ...input,
       tokenAddress: input.tokenAddress as `0x${string}`,
       fromAddress: input.fromAddress as `0x${string}` | undefined,
+      baseTokenAddress: input.baseTokenAddress as `0x${string}` | undefined,
+    });
+  }
+
+  async previewQuickTradeRoute(input: TradePreviewRouteInput) {
+    return await TradeService.previewQuickTradeRoute({
+      chainId: input.chainId,
+      tokenAddress: input.tokenAddress as `0x${string}`,
+      tokenInfo: input.tokenInfo,
+      baseTokenAddress: input.baseTokenAddress as `0x${string}` | undefined,
     });
   }
 

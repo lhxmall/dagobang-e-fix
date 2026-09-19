@@ -3,6 +3,9 @@ import { ChainId } from '@/constants/chains/chainId';
 import { FourmemeAPI } from '@/services/api/fourmeme';
 import { TokenFlapService } from '@/services/token/flap';
 import { TokenFourmemeService } from '@/services/token/fourmeme';
+import { TokenPonsService } from '@/services/token/pons';
+import { TokenO1Service } from '@/services/token/o1';
+import { TokenLongService } from '@/services/token/long';
 import { TokenService } from '@/services/token';
 import type { TokenInfo } from '@/types/token';
 import { formatUnits, isAddress } from 'viem';
@@ -156,6 +159,20 @@ export const createTokenInfoResolvers = () => {
         };
       } catch (error) {
         return { tokenInfo: null, failureReason: isRateLimitError(error) ? 'flap_rate_limited' : 'flap_fetch_failed' };
+      }
+    }
+
+    if (chainId === ChainId.RH) {
+      try {
+        const longInfo = await TokenLongService.getTokenInfo(chainId, typedAddress);
+        if (longInfo) return { tokenInfo: longInfo };
+        const o1Info = await TokenO1Service.getTokenInfo(chainId, typedAddress);
+        if (o1Info) return { tokenInfo: o1Info };
+        const ponsInfo = await TokenPonsService.getTokenInfo(chainId, typedAddress);
+        if (!ponsInfo) return { tokenInfo: null, failureReason: 'rh_launchpad_empty' };
+        return { tokenInfo: ponsInfo };
+      } catch (error) {
+        return { tokenInfo: null, failureReason: isRateLimitError(error) ? 'rpc_rate_limited' : 'rh_launchpad_fetch_failed' };
       }
     }
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, CheckCircle2, ChevronDown, Fuel, RefreshCw, Sliders, Zap } from 'lucide-react';
 import { ChainId } from '@/constants/chains/chainId';
 import { getNativeSymbol } from '@/constants/chains/runtime';
-import type { Settings } from '@/types/extention';
+import type { QuickTradeRouteHop, Settings } from '@/types/extention';
 import type { ChainAddress } from '@/types/chain/address';
 import { formatPriceValue } from '@/utils/format';
 import { t, type Locale } from '@/utils/i18n';
@@ -12,6 +12,7 @@ import {
   getSolanaTipProviderLabel,
 } from '@/utils/solanaTip';
 import { getDynamicGasPreview } from './useDynamicGasPreview';
+import { RoutePreviewHint } from './RoutePreviewHint';
 
 type TransferRecipientOption = {
   address: ChainAddress;
@@ -29,6 +30,8 @@ export type SellSectionProps = {
   quotedBaseAmounts?: Array<number | null>;
   tokenPriceUsd: number | null;
   previewRouteLabel: string | null;
+  previewRouteHops?: QuickTradeRouteHop[] | null;
+  previewRouteLoading?: boolean;
   isAltfunLayout?: boolean;
   approveStatus: 'ready' | 'approving' | 'approved';
   approveStatusTitle: string;
@@ -71,6 +74,8 @@ export function SellSection({
   quotedBaseAmounts,
   tokenPriceUsd,
   previewRouteLabel,
+  previewRouteHops,
+  previewRouteLoading = false,
   isAltfunLayout = false,
   approveStatus,
   approveStatusTitle,
@@ -161,7 +166,7 @@ export function SellSection({
   const isSolana = settings?.chainId === ChainId.SOL;
   const priorityFeeUiLabel = 'PF';
   const submitChannel = chainSettings?.submitChannel ?? 'protectRpcs';
-  const showPriorityFee = settings?.chainId !== ChainId.HYPER && (isSolana || (submitChannel !== 'protectRpcs' && submitChannel !== 'mixed'));
+  const showPriorityFee = settings?.chainId !== ChainId.HYPER && settings?.chainId !== ChainId.RH && (isSolana || (submitChannel !== 'protectRpcs' && submitChannel !== 'mixed'));
   const enabledTipProviders = Array.isArray(chainSettings?.solanaSwqos?.providers)
     ? chainSettings!.solanaSwqos!.providers.filter((item) => item?.enabled)
     : [];
@@ -395,7 +400,6 @@ export function SellSection({
 
       <div
         className={`mb-1.5 text-zinc-400 ${isTransferTab ? 'border-sky-500/10 bg-sky-500/[0.04]' : 'border-rose-500/10 bg-rose-500/[0.04]'} ${isAltfunLayout ? 'px-2.5 py-1 text-[12px]' : 'px-2 py-1 text-[11px]'}`}
-        title={previewRouteLabel || undefined}
       >
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 truncate">
@@ -406,6 +410,9 @@ export function SellSection({
               ≈ {formatUsd(activePreviewUsd)}
             </span>
           </div>
+          {!isTransferTab ? (
+            <RoutePreviewHint label={previewRouteLabel} hops={previewRouteHops} loading={previewRouteLoading} tone="sell" locale={locale} />
+          ) : null}
           {isTransferTab ? (
             <div className="min-w-0 text-right text-sky-300/85">
               {transferRecipients.length > 0 ? (

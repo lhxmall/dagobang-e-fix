@@ -3,6 +3,7 @@
  * Handles API calls to GMGN with proper authentication and headers
  */
 import { PancakeFactoryV2, PancakeFactoryV3 } from "@/constants/contracts/address";
+import { toGmgnChainName } from "@/constants/chains";
 import { TokenStat, TokenInfo } from "@/types/token";
 import { parseUnits } from "viem";
 import { getSettings } from "@/services/storage";
@@ -25,6 +26,7 @@ export interface MultiTokenInfoResponse {
     launchpad_platform?: string;
     migration_market_cap_quote?: string;
     biggest_pool_address?: string;
+    migrated_pool?: string;
     pool?: {
       pool_address?: string;
       quote_address?: string;
@@ -53,6 +55,41 @@ export interface GmgnSearchTokenItem {
     [key: string]: any;
   };
   [key: string]: any;
+}
+
+export interface FlapQuoteSupportResult {
+  supported: boolean;
+  symbol: string;
+  name: string;
+  decimals: number;
+}
+
+export interface GmgnTokenPoolFeeInfo {
+  address: string;
+  exchange?: string;
+  liquidity?: number;
+  fee_ratio?: number;
+  is_dynamic_fee?: boolean;
+  pool_type?: string;
+  meteora_virtual_curve_fee_config?: unknown;
+  meteora_damm_v2_base_fee_config?: unknown;
+  fee_params?: string[] | null;
+}
+
+interface GmgnTokenPoolFeeInfoResponse {
+  code: number;
+  reason?: string;
+  message?: string;
+  data?: {
+    list?: GmgnTokenPoolFeeInfo[] | null;
+  } | null;
+}
+
+interface FlapQuoteSupportResponse {
+  code: number;
+  reason?: string;
+  message?: string;
+  data?: FlapQuoteSupportResult;
 }
 
 interface GmgnSearchResponse {
@@ -147,9 +184,9 @@ export interface GmgnTokenHolding {
 export type GmgnPageFetchRequest = {
   url: string;
   init: {
-    method: 'POST';
+    method: 'GET' | 'POST';
     headers: Record<string, string>;
-    body: string;
+    body?: string;
     credentials: 'include';
     mode: 'cors';
   };
@@ -427,12 +464,16 @@ export class GmgnAPI {
   private static readonly HOLDINGS_BASE_URL = 'https://gmgn.ai/td/api/v1';
   private static readonly PROFIT_BASE_URL = 'https://gmgn.ai/pf/api/v1';
   private static readonly SEARCH_BASE_URL = 'https://gmgn.ai/vas/api/v1';
+  private static readonly XAPI_BASE_URL = 'https://gmgn.ai/xapi/v1';
   private static readonly TOKEN_TRADE_INFO_CACHE_MS = 5 * 60_000;
+  private static readonly TOKEN_POOL_FEE_INFO_CACHE_MS = 60_000;
   private static readonly tokenTradeInfoCache = new Map<string, { ts: number; value: TokenInfo | null }>();
   private static readonly tokenTradeInfoInFlight = new Map<string, Promise<TokenInfo | null>>();
+  private static readonly tokenPoolFeeInfoCache = new Map<string, { ts: number; value: GmgnTokenPoolFeeInfo[] }>();
+  private static readonly tokenPoolFeeInfoInFlight = new Map<string, Promise<GmgnTokenPoolFeeInfo[]>>();
 
   private static normalizeChainName(chain: string): string {
-    return String(chain || '').trim().toLowerCase();
+    return toGmgnChainName(chain);
   }
 
   public static async getTokenTradeInfo(chain: string, address: string): Promise<TokenInfo | null> {
@@ -767,6 +808,55 @@ export class GmgnAPI {
     };
   }
 
+  private static async buildPageGetRequest(
+    endpoint: string,
+    queryParams: Record<string, string | number | boolean | undefined> = {},
+    baseUrl: string = this.CANDLES_BASE_URL,
+  ): Promise<GmgnPageFetchRequest> {
+    const url = await this.buildApiUrl(endpoint, queryParams, baseUrl);
+    const headers = this.toPageFetchHeaders(await this.getHeaders());
+    return {
+      url,
+      init: {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+        mode: 'cors',
+      },
+    };
+  }
+
+  public static parseTokenPoolFeeInfoPayload(payload: unknown): GmgnTokenPoolFeeInfo[] {
+    const result = payload as GmgnTokenPoolFeeInfoResponse;
+    if (!result || typeof result !== 'object' || result.code !== 0 || !Array.isArray(result.data?.list)) {
+      return [];
+    }
+    return result.data.list
+      .filter((item): item is GmgnTokenPoolFeeInfo => !!item && typeof item.address === 'string' && !!item.address.trim())
+      .map((item) => ({
+        ...item,
+        address: String(item.address).trim(),
+        fee_ratio: item.fee_ratio == null ? item.fee_ratio : Number(item.fee_ratio),
+      }));
+  }
+
+  /** Page-world GET for token_pool_fee_info (cookies + CF). Call from gmgn content script only. */
+  public static async buildTokenPoolFeeInfoPageRequest(
+    chain: string,
+    tokenAddress: string,
+  ): Promise<GmgnPageFetchRequest> {
+    const normalizedChain = this.normalizeChainName(chain);
+    const normalizedAddress = this.normalizeQueryAddress(normalizedChain, tokenAddress);
+    if (!normalizedChain || !normalizedAddress) {
+      throw new Error('Invalid GMGN token_pool_fee_info params');
+    }
+    return await this.buildPageGetRequest(
+      `/token_pool_fee_info/${normalizedChain}/${normalizedAddress}`,
+      { worker: '0' },
+      this.CANDLES_BASE_URL,
+    );
+  }
+
   public static async followTokens(
     chain: string,
     tokens: Array<{ tokenAddress: string; groupId?: string }>
@@ -1061,7 +1151,7 @@ export class GmgnAPI {
    */
   public static async getTokenCandles(params: TokenCandlesParams): Promise<TokenCandlesResponse> {
     const { chain, tokenAddress, resolution = '1m', limit = 1 } = params;
-    const endpoint = `/token_candles/${chain}/${tokenAddress}`;
+    const endpoint = `/token_candles/${this.normalizeChainName(chain)}/${tokenAddress}`;
     const queryParams = { resolution, limit: limit.toString() };
 
     const url = await this.buildApiUrl(endpoint, queryParams, this.CANDLES_BASE_URL);
@@ -1146,15 +1236,16 @@ export class GmgnAPI {
    * @param address Token address
    */
   public static async getTokenInfo(chain: string, address: string): Promise<TokenInfo | null> {
+    const normalizedChain = this.normalizeChainName(chain);
     try {
       const [tokenInfo, linkInfo] = await Promise.all([
         this.fetchTokenInfoByEndpoint(
           '/multi_token_info',
           this.TOKEN_INFO_BASE_URL,
-          chain,
+          normalizedChain,
           address
         ),
-        this.fetchTokenLinkInfo(chain, address).catch((error) => {
+        this.fetchTokenLinkInfo(normalizedChain, address).catch((error) => {
           console.warn('Failed to fetch GMGN token link info:', error);
           return null;
         }),
@@ -1169,7 +1260,7 @@ export class GmgnAPI {
         const latestInfo = await this.fetchTokenInfoByEndpoint(
           '/mutil_window_token_info',
           this.CANDLES_BASE_URL,
-          chain,
+          normalizedChain,
           address
         ).catch((error) => {
           console.warn('Failed to fetch GMGN latest token info:', error);
@@ -1246,7 +1337,7 @@ export class GmgnAPI {
     | 'bitbucketUrl'
     | 'farcasterUrl'
   > | null> {
-    const endpoint = `/mutil_window_token_link_rug_vote/${String(chain || '').toLowerCase()}/${address}`;
+    const endpoint = `/mutil_window_token_link_rug_vote/${this.normalizeChainName(chain)}/${address}`;
     const url = await this.buildApiUrl(endpoint, { worker: '0' }, this.CANDLES_BASE_URL);
     const headers = await this.getHeaders();
     const response = await this.makeRequest(url, {
@@ -1296,10 +1387,11 @@ export class GmgnAPI {
     address: string
   ): Promise<TokenInfo | null> {
     const extraParams = endpoint === '/mutil_window_token_info' ? { worker: '0' } : {};
+    const normalizedChain = this.normalizeChainName(chain);
     const url = await this.buildApiUrl(endpoint, extraParams, baseUrl);
     const headers = await this.getHeaders();
     const payload = {
-      chain,
+      chain: normalizedChain,
       addresses: [address]
     };
 
@@ -1315,7 +1407,7 @@ export class GmgnAPI {
 
     const result = await response.json() as MultiTokenInfoResponse;
     if (result.code === 0 && result.data && result.data.length > 0) {
-      return this.normalizeTokenInfo(result.data[0], chain);
+      return this.normalizeTokenInfo(result.data[0], normalizedChain);
     }
     return null;
   }
@@ -1406,9 +1498,16 @@ export class GmgnAPI {
     const exchange = tokenData.tpool?.exchange;
     const launchType = String(tokenData.tpool?.launch_type || '').trim().toLowerCase();
     const isMigrated = launchType === 'migrated' || Number(tokenData.launchpad_status || 0) === 1;
-    const dexType = isMigrated ? this.getDexType(exchange) : undefined;
     const biggestPoolAddress = tokenData.biggest_pool_address || undefined;
-    const tpoolPoolAddress = tokenData.tpool?.pool_address || tokenData.pool?.pool_address || undefined;
+    const migratedPoolAddress = String(tokenData.migrated_pool || '').trim() || undefined;
+    const tpoolPoolAddress = tokenData.tpool?.pool_address || tokenData.pool?.pool_address || migratedPoolAddress || undefined;
+    const launchpadPlatform = String(tokenData.launchpad_platform || tokenData.launchpad || '').trim().toLowerCase();
+    const looksV4Pool = /^0x[a-fA-F0-9]{64}$/.test(String(biggestPoolAddress || migratedPoolAddress || tpoolPoolAddress || ''));
+    const dexType = this.getDexType(exchange)
+      || ((isMigrated && looksV4Pool) || launchpadPlatform === 'o1' || launchpadPlatform.startsWith('o1_')
+        || launchpadPlatform === 'long' || launchpadPlatform === 'longxyz' || launchpadPlatform === 'long.xyz'
+        ? 'UNISWAP_V4'
+        : undefined);
     const totalSupply = this.normalizeTotalSupply(
       tokenData.totalSupply
       ?? tokenData.total_supply
@@ -1538,7 +1637,7 @@ export class GmgnAPI {
       launchpad_status: Number(tokenData.launchpad_status || 0),
       quote_token: quoteToken,
       quote_token_address: quoteTokenAddress,
-      pool_pair: isMigrated ? (biggestPoolAddress || tpoolPoolAddress) : undefined,
+      pool_pair: isMigrated ? (migratedPoolAddress || tpoolPoolAddress || biggestPoolAddress) : undefined,
       biggest_pool_address: biggestPoolAddress,
       tpool_exchange: exchange,
       tpool_launch_type: launchType || undefined,
@@ -1703,7 +1802,7 @@ export class GmgnAPI {
     const endpoint = '/wallets/balances';
     const queryParams = {
       worker: '0',
-      chain,
+      chain: this.normalizeChainName(chain),
       token_address: tokenAddress,
       wallet_addresses: walletAddress
     };
@@ -1809,7 +1908,7 @@ export class GmgnAPI {
 
   public static async getDailyProfits(params: DailyProfitParams): Promise<DailyProfitResponse> {
     const { chain, wallet_addresses, start_at, end_at } = params;
-    const endpoint = `/wallets/${chain}/daily_profits`;
+    const endpoint = `/wallets/${this.normalizeChainName(chain)}/daily_profits`;
     const url = await this.buildApiUrl(endpoint, {}, this.PROFIT_BASE_URL);
     const headers = await this.getHeaders();
 
@@ -1868,6 +1967,141 @@ export class GmgnAPI {
       console.error('Failed to fetch token holding detail:', error);
       throw error;
     }
+  }
+
+  /**
+   * Check whether an ERC20 can be used as a Flap quote/base pool token.
+   * GET /xapi/v1/{chain}/flap/quote_support
+   */
+  public static async checkFlapQuoteSupport(
+    chain: string,
+    tokenAddress: string,
+  ): Promise<FlapQuoteSupportResult> {
+    const unsupported: FlapQuoteSupportResult = {
+      supported: false,
+      symbol: '',
+      name: '',
+      decimals: 0,
+    };
+    const normalizedChain = this.normalizeChainName(chain) || 'bsc';
+    const normalizedAddress = this.normalizeQueryAddress(normalizedChain, tokenAddress);
+    if (!normalizedAddress) return unsupported;
+
+    const endpoint = `/${normalizedChain}/flap/quote_support`;
+    const url = await this.buildApiUrl(endpoint, {
+      worker: '0',
+      token: normalizedAddress,
+    }, this.XAPI_BASE_URL);
+    const headers = await this.getHeaders();
+    try {
+      const response = await this.makeRequest(url, {
+        method: 'GET',
+        headers,
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const result = await response.json() as FlapQuoteSupportResponse;
+      if (result.code !== 0 || !result.data) return unsupported;
+      return {
+        supported: Boolean(result.data.supported),
+        symbol: String(result.data.symbol || ''),
+        name: String(result.data.name || ''),
+        decimals: Number(result.data.decimals) || 0,
+      };
+    } catch (error) {
+      console.error('Failed to check Flap quote support:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Pool fee list for a token (includes Uniswap v4 poolId + fee_ratio).
+   * GET /api/v1/token_pool_fee_info/{chain}/{token}
+   * @see docs/gmgn-api-token_pool_fee_info.md
+   */
+  public static async getTokenPoolFeeInfo(
+    chain: string,
+    tokenAddress: string,
+    options?: { timeoutMs?: number },
+  ): Promise<GmgnTokenPoolFeeInfo[]> {
+    const normalizedChain = this.normalizeChainName(chain);
+    const normalizedAddress = this.normalizeQueryAddress(normalizedChain, tokenAddress);
+    if (!normalizedChain || !normalizedAddress) return [];
+
+    const key = `${normalizedChain}:${normalizedAddress.toLowerCase()}`;
+    const now = Date.now();
+    const cached = this.tokenPoolFeeInfoCache.get(key);
+    if (cached && now - cached.ts < this.TOKEN_POOL_FEE_INFO_CACHE_MS) {
+      return cached.value;
+    }
+    const inFlight = this.tokenPoolFeeInfoInFlight.get(key);
+    if (inFlight) return await inFlight;
+
+    const timeoutMs = Math.max(300, Math.min(options?.timeoutMs ?? 900, 2_000));
+    const task = (async (): Promise<GmgnTokenPoolFeeInfo[]> => {
+      const endpoint = `/token_pool_fee_info/${normalizedChain}/${normalizedAddress}`;
+      const url = await this.buildApiUrl(endpoint, { worker: '0' }, this.CANDLES_BASE_URL);
+      const headers = await this.getHeaders();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await this.makeRequest(url, {
+          method: 'GET',
+          headers,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const result = await response.json() as GmgnTokenPoolFeeInfoResponse;
+        if (result.code !== 0 || !Array.isArray(result.data?.list)) {
+          // Short negative cache so a transient miss does not stick for a full minute.
+          this.tokenPoolFeeInfoCache.set(key, { ts: Date.now() - this.TOKEN_POOL_FEE_INFO_CACHE_MS + 3_000, value: [] });
+          return [];
+        }
+        const list = this.parseTokenPoolFeeInfoPayload(result);
+        this.tokenPoolFeeInfoCache.set(key, { ts: Date.now(), value: list });
+        return list;
+      } catch (error) {
+        console.error('Failed to fetch token pool fee info:', error);
+        this.tokenPoolFeeInfoCache.set(key, { ts: Date.now() - this.TOKEN_POOL_FEE_INFO_CACHE_MS + 3_000, value: [] });
+        return [];
+      } finally {
+        clearTimeout(timer);
+        this.tokenPoolFeeInfoInFlight.delete(key);
+      }
+    })();
+
+    this.tokenPoolFeeInfoInFlight.set(key, task);
+    return await task;
+  }
+
+  public static findTokenPoolFeeInfo(
+    list: GmgnTokenPoolFeeInfo[] | null | undefined,
+    poolAddress?: string | null,
+  ): GmgnTokenPoolFeeInfo | null {
+    const want = String(poolAddress || '').trim().toLowerCase();
+    if (!want || !Array.isArray(list) || !list.length) return null;
+    return list.find((item) => String(item.address || '').trim().toLowerCase() === want) ?? null;
+  }
+
+  /** Uniswap fee units: 0.003 → 3000 (0.3%), 0.01 → 10000 (1%). */
+  public static feeRatioToUniswapFee(feeRatio: number, isDynamicFee?: boolean): number | null {
+    const ratio = Number(feeRatio);
+    if (!Number.isFinite(ratio) || ratio < 0) return null;
+    const fee = Math.round(ratio * 1_000_000);
+    if (!Number.isFinite(fee) || fee < 0) return null;
+    // fee_ratio=0 is valid for RH hook launchpads (o1 etc. encode PoolKey.fee=0).
+    // Dynamic pools still use the 0x800000 flag.
+    return isDynamicFee ? (fee | 0x800000) : fee;
+  }
+
+  public static tickSpacingFromPoolFeeParams(feeParams?: string[] | null): number | null {
+    const raw = Array.isArray(feeParams) ? feeParams[0] : null;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0 || value > 2000 || !Number.isInteger(value)) return null;
+    return value;
   }
 }
 

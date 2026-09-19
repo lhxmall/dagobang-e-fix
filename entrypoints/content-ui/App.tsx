@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import toast from 'react-hot-toast';
 import { SatelliteDish } from 'lucide-react';
 import { formatUnits, parseUnits, zeroAddress } from 'viem';
-import type { Account, BgGetStateResponse, QuickBuyPresetOverride, Settings, SubmitChannel, TradeSuccessSoundPreset, TradeTurboPrewarmInput } from '@/types/extention';
+import type { Account, BgGetStateResponse, QuickBuyPresetOverride, QuickTradeRoutePreview, Settings, SubmitChannel, TradeSuccessSoundPreset, TradeTurboPrewarmInput } from '@/types/extention';
 import type { TokenInfo, TokenStat } from '@/types/token';
 import { normalizeLocale, t, type Locale } from '@/utils/i18n';
 import { formatBroadcastProvider, formatPriceValue } from '@/utils/format';
@@ -11,7 +11,7 @@ import { call } from '@/utils/messaging';
 import { TokenAPI } from '@/hooks/TokenAPI';
 import GmgnAPI, { type GmgnPageFetchRequest, type GmgnTokenHolding } from '@/hooks/GmgnAPI';
 import { TokenService } from '@/services/token';
-import { getChainIdByName, getNativeSymbol } from '@/constants/chains';
+import { getChainIdByName, getNativeSymbol, normalizeChainName, toGmgnChainName } from '@/constants/chains';
 import { ChainId } from '@/constants/chains/chainId';
 import { getChainRuntimeBase, isSolanaChain } from '@/constants/chains/runtime';
 import { getEvmChainRuntime } from '@/constants/chains/evmRuntime';
@@ -36,6 +36,8 @@ import { RpcPanel } from './components/RpcPanel';
 import { DailyAnalysisPanel } from './components/DailyAnalysisPanel';
 import { ReviewPanel } from './components/ReviewPanel';
 import { QuickTradePanel } from './components/QuickTradePanel';
+import { labelQuickTradeRouteHops, reverseQuickTradeRouteHops } from './components/QuickTradePanel/RoutePreviewHint';
+import { isEvmRouteAlignedWithPayToken } from '@/utils/quickTradeRoutePreview';
 import { FloatingToolbar } from './components/FloatingToolbar';
 import { CookingPanel } from './components/CookingPanel';
 import { useDynamicGasPreview } from './components/QuickTradePanel/useDynamicGasPreview';
@@ -138,6 +140,8 @@ function getTokenInfoWarmFingerprint(tokenInfo: TokenInfo | null | undefined): s
     String(tokenInfo.launchpad_platform || '').toLowerCase(),
     String(tokenInfo.launchpad_status ?? ''),
     String(tokenInfo.quote_token_address || '').toLowerCase(),
+    String(tokenInfo.dex_type || '').toLowerCase(),
+    String(tokenInfo.pool_pair || tokenInfo.biggest_pool_address || '').toLowerCase(),
   ].join('|');
 }
 
@@ -405,7 +409,7 @@ function deriveUsdFromBaseAmount(
 ): number | null {
   if (!Number.isFinite(amount) || amount <= 0) return null;
   const symbol = tradeBaseTokenMeta.symbol.toUpperCase();
-  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'USD1') return amount;
+  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'USD1' || symbol === 'USDG') return amount;
   if (tradeBaseTokenAddress.toLowerCase() === zeroAddress.toLowerCase()) {
     return baseTokenPriceUsd && baseTokenPriceUsd > 0 ? amount * baseTokenPriceUsd : null;
   }
@@ -419,7 +423,7 @@ function deriveBaseAmountFromUsd(
 ): number | null {
   if (!Number.isFinite(usdAmount) || usdAmount <= 0) return null;
   const symbol = tradeBaseTokenMeta.symbol.toUpperCase();
-  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'USD1') return usdAmount;
+  if (symbol === 'USDC' || symbol === 'USDT' || symbol === 'USD1' || symbol === 'USDG') return usdAmount;
   return baseTokenPriceUsd && baseTokenPriceUsd > 0 ? usdAmount / baseTokenPriceUsd : null;
 }
 
@@ -577,6 +581,11 @@ export default function App() {
   const [buyPreviewQuotedTokenAmounts, setBuyPreviewQuotedTokenAmounts] = useState<Array<number | null>>([null, null, null, null]);
   const [sellPreviewQuotedUsd, setSellPreviewQuotedUsd] = useState<Array<number | null>>([null, null, null, null]);
   const [sellPreviewQuotedBaseAmounts, setSellPreviewQuotedBaseAmounts] = useState<Array<number | null>>([null, null, null, null]);
+  const [evmRoutePreview, setEvmRoutePreview] = useState<{
+    chainId: number;
+    tokenAddress: string;
+    preview: QuickTradeRoutePreview;
+  } | null>(null);
   const [marketCapDisplay, setMarketCapDisplay] = useState<string | null>(null);
   const [liquidityDisplay, setLiquidityDisplay] = useState<string | null>(null);
   const [gmgnHoldingStats, setGmgnHoldingStats] = useState<GmgnHoldingStats | null>(null);
@@ -615,6 +624,9 @@ export default function App() {
   const prewarmTurboErrorRef = useRef<Map<string, string>>(new Map());
   const prewarmedRpcRef = useRef<Set<string>>(new Set());
   const prewarmTurboInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
+  const evmRouteRequestSeqRef = useRef(0);
+  const evmRouteFingerprintRef = useRef('');
+  const evmRouteIdentityRef = useRef('');
   const solSubmitKickoffQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
   const fastPollingRef = useRef<any>(null);
   const approveStatusRefreshSeqRef = useRef(0);
@@ -870,7 +882,7 @@ export default function App() {
     if (!tokenContextSiteInfo?.tokenAddress) return null;
     return normalizeSiteTokenAddress(chainId, tokenContextSiteInfo.tokenAddress);
   }, [chainId, tokenContextSiteInfo]);
-  const gmgnHoldingChain = isSolana ? 'sol' : String(siteInfo?.chain || '').trim().toLowerCase();
+  const gmgnHoldingChain = isSolana ? 'sol' : (siteInfo?.chain ? toGmgnChainName(siteInfo.chain) : '');
   const shouldEnableHoldingStats = !!tokenAddressNormalized && gmgnHoldingWallets.length > 0;
   useEffect(() => {
     approveStatusRefreshSeqRef.current += 1;
@@ -1216,8 +1228,11 @@ export default function App() {
       const amount = detail.amountBnb as string | undefined;
       if (!addr || !amount) return;
       if (!settings) return;
+      const chain = normalizeChainName(typeof detail.chain === 'string' ? detail.chain : '')
+        || normalizeChainName(parseCurrentUrl(window.location.href)?.chain || '')
+        || 'bsc';
       const site: SiteInfo = {
-        chain: 'bsc',
+        chain,
         tokenAddress: addr,
         platform: 'gmgn',
       };
@@ -1244,9 +1259,9 @@ export default function App() {
       if (!detail) return;
       const addr = typeof detail.tokenAddress === 'string' ? detail.tokenAddress.trim() : '';
       if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) return;
-      const chain = typeof detail.chain === 'string' && detail.chain.trim()
-        ? detail.chain.trim().toLowerCase()
-        : 'bsc';
+      const chain = normalizeChainName(
+        typeof detail.chain === 'string' && detail.chain.trim() ? detail.chain : 'bsc'
+      ) || 'bsc';
       const platform = detail.platform === 'gmgn' ? 'gmgn' : 'gmgn';
       const nextSiteInfo: SiteInfo = {
         chain,
@@ -1522,6 +1537,8 @@ export default function App() {
     debugStartLocation?: string;
     debugDoneLocation?: string;
     debugMsgPrefix?: string;
+    applyRoute?: boolean;
+    routeSeq?: number;
     onDone?: () => void;
   }) => {
     if (!tokenAddressNormalized) return Promise.resolve();
@@ -1536,12 +1553,24 @@ export default function App() {
       fromAddress: input.fromAddress,
       submitChannel,
       platform: normalizedSitePlatform || undefined,
+      baseTokenAddress: tradeBaseTokenAddress,
     };
     const inflight = call({
       type: 'trade:prewarmTurbo',
       input: prewarmInput,
     } as const)
-      .then(() => {
+      .then((res) => {
+        if (
+          input.applyRoute !== false
+          && res.route
+          && (typeof input.routeSeq !== 'number' || input.routeSeq === evmRouteRequestSeqRef.current)
+        ) {
+          setEvmRoutePreview({
+            chainId: prewarmInput.chainId,
+            tokenAddress: String(prewarmInput.tokenAddress || '').toLowerCase(),
+            preview: res.route,
+          });
+        }
         prewarmTurboErrorRef.current.delete(input.key);
         prewarmedTurboRef.current.set(input.key, Date.now());
       })
@@ -1559,11 +1588,12 @@ export default function App() {
       });
     prewarmTurboInFlightRef.current.set(input.key, inflight);
     return inflight;
-  }, [chainId, normalizedSitePlatform, submitChannel, tokenAddressNormalized, tokenInfo]);
+  }, [chainId, normalizedSitePlatform, submitChannel, tokenAddressNormalized, tokenInfo, tradeBaseTokenAddress]);
 
   useEffect(() => {
     if (!tokenAddressNormalized) {
       setTurboPrewarmState('idle');
+      setEvmRoutePreview(null);
       return;
     }
     if (isSolana) {
@@ -1592,7 +1622,7 @@ export default function App() {
         cancelled = true;
       };
     }
-    if (!isUnlocked || !address || !tokenInfo) {
+    if (!tokenInfo) {
       setTurboPrewarmState('warming');
       return;
     }
@@ -1600,26 +1630,67 @@ export default function App() {
       chainId,
       sitePlatform: normalizedSitePlatform,
       tokenAddress: tokenAddressNormalized,
-      address,
+      address: isUnlocked ? address : undefined,
       tokenInfo: tokenInfo as TokenInfo | null | undefined,
     });
-    if (isSolPrewarmFresh(key)) {
-      setTurboPrewarmState('done');
-      return;
+    const routeIdentity = [
+      chainId,
+      tokenAddressNormalized,
+      String(tradeBaseTokenAddress || '').toLowerCase(),
+    ].join(':');
+    const routeFingerprint = [
+      routeIdentity,
+      getTokenInfoWarmFingerprint(tokenInfo as TokenInfo),
+    ].join(':');
+    const identityChanged = evmRouteIdentityRef.current !== routeIdentity;
+    const fingerprintChanged = evmRouteFingerprintRef.current !== routeFingerprint;
+    if (identityChanged) {
+      // Only wipe the badge when the traded token / pay token changes.
+      evmRouteIdentityRef.current = routeIdentity;
+      setEvmRoutePreview(null);
+    }
+    if (fingerprintChanged) {
+      evmRouteFingerprintRef.current = routeFingerprint;
+      evmRouteRequestSeqRef.current += 1;
+      setTurboPrewarmState('warming');
+    }
+    const routeSeq = evmRouteRequestSeqRef.current;
+    // Always re-apply route into React state. "Fresh" warm cache must not skip apply,
+    // or a cleared/missing badge never comes back until full page reload.
+    const shouldApplyRoute = true;
+    if (isSolPrewarmFresh(key) && !fingerprintChanged && !identityChanged) {
+      // Still ask background for the cached prepared preview so UI state is restored.
+      let cancelled = false;
+      void startSolTurboPrewarm({
+        key,
+        fromAddress: isUnlocked ? address : undefined,
+        applyRoute: shouldApplyRoute,
+        routeSeq,
+        onDone: () => {
+          if (!cancelled) setTurboPrewarmState('done');
+        },
+      });
+      return () => {
+        cancelled = true;
+      };
     }
     let cancelled = false;
-    setTurboPrewarmState('warming');
+    if (!isSolPrewarmFresh(key) || fingerprintChanged || identityChanged) {
+      setTurboPrewarmState('warming');
+    }
     void startSolTurboPrewarm({
       key,
-      fromAddress: address,
+      fromAddress: isUnlocked ? address : undefined,
+      applyRoute: shouldApplyRoute,
+      routeSeq,
       onDone: () => {
-        if (!cancelled) setTurboPrewarmState(isSolPrewarmFresh(key) ? 'done' : 'warming');
+        if (!cancelled) setTurboPrewarmState('done');
       },
     });
     return () => {
       cancelled = true;
     };
-  }, [isUnlocked, address, tokenAddressNormalized, tokenInfo, chainId, submitChannel, isSolana, normalizedSitePlatform, startSolTurboPrewarm]);
+  }, [isUnlocked, address, tokenAddressNormalized, tokenInfo, chainId, submitChannel, isSolana, normalizedSitePlatform, startSolTurboPrewarm, tradeBaseTokenAddress]);
 
   useEffect(() => {
     if (!isSolana || !tokenAddressNormalized || !shouldKeepSolPrewarmWarm) return;
@@ -2334,7 +2405,7 @@ export default function App() {
         } as TokenInfo
       : null;
     const stableSymbol = tradeBaseTokenMeta.symbol.toUpperCase();
-    if (stableSymbol === 'USDC' || stableSymbol === 'USDT' || stableSymbol === 'USD1') {
+    if (stableSymbol === 'USDC' || stableSymbol === 'USDT' || stableSymbol === 'USD1' || stableSymbol === 'USDG') {
       setTradeBasePriceUsd(1);
       return;
     }
@@ -2387,6 +2458,29 @@ export default function App() {
     }
     return { buy: null, sell: null };
   }, [siteInfo?.platform, chainId, resolvedTokenSymbol, tradeBaseTokenMeta.symbol, tokenInfo, tokenAddressNormalized]);
+
+  const activeEvmRoutePreview = (
+    evmRoutePreview
+    && evmRoutePreview.chainId === chainId
+    && evmRoutePreview.tokenAddress === String(tokenAddressNormalized || '').toLowerCase()
+    && isEvmRouteAlignedWithPayToken({
+      chainId,
+      hops: evmRoutePreview.preview.hops,
+      payToken: tradeBaseTokenAddress,
+    })
+  ) ? evmRoutePreview.preview : null;
+
+  // One pipeline only: never paint a local/cold-start route. Show loading until prepare returns.
+  const buyPreviewRouteHops = activeEvmRoutePreview?.hops?.length ? activeEvmRoutePreview.hops : null;
+  const buyPreviewRoute = labelQuickTradeRouteHops(buyPreviewRouteHops);
+  const sellPreviewRouteHops = reverseQuickTradeRouteHops(buyPreviewRouteHops);
+  const sellPreviewRoute = labelQuickTradeRouteHops(sellPreviewRouteHops);
+  const evmRoutePreviewLoading = !isSolana
+    && chainId !== 999
+    && !!tokenAddressNormalized
+    && !!tokenInfo
+    && !buyPreviewRouteHops
+    && turboPrewarmState !== 'done';
 
   useEffect(() => {
     if (!tokenAddressNormalized || !settings || !siteInfo || chainId !== 999 || siteInfo.platform !== 'altfun') {
@@ -2599,7 +2693,7 @@ export default function App() {
     if (!normalizedTokenAddress) return false;
     if (settings?.ui?.gmgnLimitOrderPriceEnabled !== true) return false;
     if (siteInfo?.platform !== 'gmgn') return false;
-    const chain = String(siteInfo?.chain || '').trim().toLowerCase();
+    const chain = siteInfo?.chain ? toGmgnChainName(siteInfo.chain) : '';
     if (!chain) return false;
     try {
       console.info('[gmgn.limitOrder.follow.page_action]', {
@@ -2629,7 +2723,7 @@ export default function App() {
     if (!normalizedTokenAddress) return false;
     if (settings?.ui?.gmgnLimitOrderPriceEnabled !== true) return false;
     if (siteInfo?.platform !== 'gmgn') return false;
-    const chain = String(siteInfo?.chain || '').trim().toLowerCase();
+    const chain = siteInfo?.chain ? toGmgnChainName(siteInfo.chain) : '';
     if (!chain) return false;
     try {
       const listed = await call({ type: 'limitOrder:list', chainId, tokenAddress: normalizedTokenAddress } as const);
@@ -3287,6 +3381,22 @@ export default function App() {
           }
         })();
       }
+      if (message.type === 'bg:gmgn:pageTokenPoolFeeInfo') {
+        return (async () => {
+          if (siteInfo?.platform !== 'gmgn') return { ok: false, error: 'not_gmgn_page' };
+          try {
+            const chain = typeof message?.chain === 'string' ? message.chain : 'bsc';
+            const tokenAddress = typeof message?.tokenAddress === 'string' ? message.tokenAddress.trim() : '';
+            if (!tokenAddress) return { ok: false, error: 'invalid_token' };
+            const request = await GmgnAPI.buildTokenPoolFeeInfoPageRequest(chain, tokenAddress);
+            const payload = await requestGmgnPageFetch(request);
+            const list = GmgnAPI.parseTokenPoolFeeInfoPayload(payload);
+            return { ok: true, list };
+          } catch (e: any) {
+            return { ok: false, error: String(e?.message || e || 'gmgn_token_pool_fee_info_failed') };
+          }
+        })();
+      }
       if (message.type === 'bg:tokenSniper:gmgnWalletAddress') {
         return (async () => {
           if (siteInfo?.platform !== 'gmgn') return { ok: false, error: 'not_gmgn_page' };
@@ -3425,7 +3535,8 @@ export default function App() {
             void createAutoSellOrdersForWallet({
               ...pendingAutoSell,
               actualTokenOutWei: (message as any)?.actualTokenOutWei ?? pendingAutoSell.actualTokenOutWei ?? null,
-              quotedOutWei: (message as any)?.quotedOutWei ?? (message as any)?.protectionMinOutWei ?? pendingAutoSell.quotedOutWei ?? null,
+              // Never carry protectionMinOutWei as quotedOutWei — that is a slippage floor, not a fill.
+              quotedOutWei: (message as any)?.quotedOutWei ?? pendingAutoSell.quotedOutWei ?? null,
             })
                 .then(() => {})
               .catch((error) => {
@@ -3828,9 +3939,11 @@ export default function App() {
           tokenInfo,
           fromAddress: walletAddress,
         } as const) as { insufficient?: boolean };
+        // Strict: only mark approved when check explicitly says insufficient === false.
+        // (!undefined) used to flip missing/timeout-shaped responses into "已授权".
         return {
           walletAddress,
-          approved: !res.insufficient,
+          approved: res.insufficient === false,
         };
       })
     );
@@ -3908,10 +4021,12 @@ export default function App() {
       for (const result of results) {
         if (result.status === 'fulfilled') {
           const key = result.value.walletAddress.toLowerCase();
-          const txHash = result.value.res?.txHash;
-          next[key] = txHash
-            ? { approved: false, pendingSince: pendingSince }
-            : { approved: true };
+          // Never trust "no txHash" as approved — that path used to show 已授权 while
+          // DagobangRouter allowance was still 0. Keep pending until on-chain refresh.
+          next[key] = {
+            approved: false,
+            pendingSince,
+          };
           continue;
         }
         const failedWallet = evmWallets[results.indexOf(result)];
@@ -3934,7 +4049,7 @@ export default function App() {
       if (submitted.length > 0 || alreadyApprovedCount > 0) {
         const parts = [
           submitted.length > 0 ? `已提交 ${submitted.length}` : '',
-          alreadyApprovedCount > 0 ? `已授权 ${alreadyApprovedCount}` : '',
+          alreadyApprovedCount > 0 ? `确认中 ${alreadyApprovedCount}` : '',
         ].filter(Boolean);
         toast.success(`授权状态已更新 ${parts.join(' / ')}`, { icon: '✅' });
       }
@@ -4045,14 +4160,17 @@ export default function App() {
   };
 
   const resolveAutoSellEntryPriceUsd = useCallback((ctx: PendingAutoSellOrderContext) => {
+    // Only use actual fill size from receipt. Never use protectionMinOutWei / slippage floor —
+    // that understates tokens received and inflates entry (often enough to auto-trigger stop-loss).
     const rawBuyNativeAmountWei = String(ctx.buyNativeAmountWei || '').trim();
-    const rawTokenOutWei = String(ctx.actualTokenOutWei || ctx.quotedOutWei || '').trim();
+    const rawTokenOutWei = String(ctx.actualTokenOutWei || '').trim();
     const tokenDecimals = Number(ctx.tokenInfo?.decimals ?? 0);
     if (!rawBuyNativeAmountWei || !rawTokenOutWei) return null;
     if (!Number.isFinite(tokenDecimals) || tokenDecimals < 0) return null;
     try {
       const spentBaseAmount = Number(formatUnits(BigInt(rawBuyNativeAmountWei), tradeBaseTokenMeta.decimals));
       const receivedTokenAmount = Number(formatUnits(BigInt(rawTokenOutWei), tokenDecimals));
+      if (!(Number.isFinite(receivedTokenAmount) && receivedTokenAmount > 0)) return null;
       const spentUsd = deriveUsdFromBaseAmount(
         spentBaseAmount,
         tradeBaseTokenAddress,
@@ -4060,7 +4178,6 @@ export default function App() {
         tradeBasePriceUsd,
       );
       if (!(spentUsd != null && spentUsd > 0)) return null;
-      if (!(Number.isFinite(receivedTokenAmount) && receivedTokenAmount > 0)) return null;
       const entryPriceUsd = spentUsd / receivedTokenAmount;
       return Number.isFinite(entryPriceUsd) && entryPriceUsd > 0 ? entryPriceUsd : null;
     } catch {
@@ -4081,13 +4198,33 @@ export default function App() {
     const marketPriceUsd = fetchedPriceUsd != null && fetchedPriceUsd > 0
       ? fetchedPriceUsd
       : (Number.isFinite(fallbackPriceUsd) && fallbackPriceUsd > 0 ? fallbackPriceUsd : null);
-    const basePriceUsd = entryPriceFromTradeUsd != null && entryPriceFromTradeUsd > 0
-      ? entryPriceFromTradeUsd
-      : marketPriceUsd;
-    if (basePriceUsd == null || !(basePriceUsd > 0)) return 0;
-    const entryPriceUsd = entryPriceFromTradeUsd != null && entryPriceFromTradeUsd > 0
-      ? entryPriceFromTradeUsd
-      : basePriceUsd;
+
+    // Prefer true fill price; if missing or wildly above live market, use market.
+    // Inflated entry (e.g. from minOut/slippage floor) creates stop-loss above spot → instant sell.
+    let entryPriceUsd: number | null = null;
+    if (entryPriceFromTradeUsd != null && entryPriceFromTradeUsd > 0) {
+      if (
+        marketPriceUsd != null
+        && marketPriceUsd > 0
+        && entryPriceFromTradeUsd > marketPriceUsd * 1.35
+      ) {
+        console.warn('[autoSell.entryPrice.reject_inflated_fill]', {
+          chainId: ctx.chainId,
+          tokenAddress,
+          entryPriceFromTradeUsd,
+          marketPriceUsd,
+          ratio: entryPriceFromTradeUsd / marketPriceUsd,
+          actualTokenOutWei: ctx.actualTokenOutWei ?? null,
+        });
+        entryPriceUsd = marketPriceUsd;
+      } else {
+        entryPriceUsd = entryPriceFromTradeUsd;
+      }
+    } else {
+      entryPriceUsd = marketPriceUsd;
+    }
+    if (entryPriceUsd == null || !(entryPriceUsd > 0)) return 0;
+    const basePriceUsd = entryPriceUsd;
     console.info('[autoSell.entryPrice.resolve]', {
       chainId: ctx.chainId,
       tokenAddress,
@@ -4430,7 +4567,7 @@ export default function App() {
         const first = successes[0].res;
         const quotedOutWei = chainId === ChainId.SOL
           ? null
-          : (first.quotedOutWei ?? first.protectionMinOutWei ?? null);
+          : (first.quotedOutWei ?? null);
         if (first?.txHash) setTxHash(first.txHash);
         setPendingBuyQuotedOutWei(quotedOutWei);
         if (confirmedSuccesses.length > 0) {
@@ -4464,7 +4601,7 @@ export default function App() {
               walletAddress,
               buyNativeAmountWei,
               actualTokenOutWei: (res as any)?.actualTokenOutWei ?? null,
-              quotedOutWei: (res as any)?.quotedOutWei ?? (res as any)?.protectionMinOutWei ?? null,
+              quotedOutWei: (res as any)?.quotedOutWei ?? null,
               siteInfo,
               tokenInfo,
               tokenSymbol: resolvedTokenSymbol ?? null,
@@ -5603,8 +5740,12 @@ export default function App() {
               sellPreviewQuotedUsd={sellPreviewQuotedUsd}
               sellPreviewQuotedBaseAmounts={sellPreviewQuotedBaseAmounts}
               tokenSymbol={resolvedTokenSymbol}
-              buyPreviewRoute={quickTradePreviewRoutes.buy}
-              sellPreviewRoute={quickTradePreviewRoutes.sell}
+              buyPreviewRoute={buyPreviewRoute}
+              sellPreviewRoute={sellPreviewRoute}
+              buyPreviewRouteHops={buyPreviewRouteHops}
+              sellPreviewRouteHops={sellPreviewRouteHops}
+              routePreviewLoading={evmRoutePreviewLoading}
+              channelRouteTagLabel={quickTradePreviewRoutes.buy}
               approveStatus={selectedApproveStatus}
               approveStatusTitle={approveStatusTitle}
               sellActionReady={sellActionReady}

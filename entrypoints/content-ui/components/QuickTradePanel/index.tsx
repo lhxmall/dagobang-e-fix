@@ -1,5 +1,5 @@
 import { useState, type PointerEvent as ReactPointerEvent } from 'react';
-import type { Account, QuickBuyPresetOverride, Settings } from '@/types/extention';
+import type { Account, QuickBuyPresetOverride, QuickTradeRouteHop, Settings } from '@/types/extention';
 import type { ChainAddress } from '@/types/chain/address';
 import type { SiteInfo } from '@/utils/sites';
 import type { Locale } from '@/utils/i18n';
@@ -84,6 +84,10 @@ type QuickTradePanelProps = {
   tokenSymbol: string | null;
   buyPreviewRoute: string | null;
   sellPreviewRoute: string | null;
+  buyPreviewRouteHops?: QuickTradeRouteHop[] | null;
+  sellPreviewRouteHops?: QuickTradeRouteHop[] | null;
+  routePreviewLoading?: boolean;
+  channelRouteTagLabel?: string | null;
   approveStatus: 'ready' | 'approving' | 'approved';
   approveStatusTitle: string;
   sellActionReady?: boolean;
@@ -184,6 +188,10 @@ export function QuickTradePanel({
   tokenSymbol,
   buyPreviewRoute,
   sellPreviewRoute,
+  buyPreviewRouteHops,
+  sellPreviewRouteHops,
+  routePreviewLoading = false,
+  channelRouteTagLabel,
   approveStatus,
   approveStatusTitle,
   sellActionReady = true,
@@ -238,6 +246,8 @@ export function QuickTradePanel({
     quotedBaseAmounts: sellPreviewQuotedBaseAmounts,
     tokenPriceUsd,
     previewRouteLabel: sellPreviewRoute,
+    previewRouteHops: sellPreviewRouteHops,
+    previewRouteLoading: routePreviewLoading,
     isAltfunLayout: siteInfo.platform === 'altfun',
     approveStatus,
     approveStatusTitle,
@@ -351,6 +361,8 @@ export function QuickTradePanel({
             tokenPriceUsd={tokenPriceUsd}
             tokenSymbol={tokenSymbol}
             previewRouteLabel={buyPreviewRoute}
+            previewRouteHops={buyPreviewRouteHops}
+            previewRouteLoading={routePreviewLoading}
             isAltfunLayout={siteInfo.platform === 'altfun'}
             busy={busy}
             isUnlocked={isUnlocked}
@@ -382,7 +394,7 @@ export function QuickTradePanel({
             onUpdateAdvancedAutoSell={onUpdateAdvancedAutoSell}
             channelActiveKey={channelActiveKey}
             channelOptions={channelOptions}
-            channelRouteTagLabel={buyPreviewRoute}
+            channelRouteTagLabel={channelRouteTagLabel ?? null}
             onSelectChannel={onSelectChannel}
             prewarmIndicatorState={prewarmIndicatorState}
             prewarmIndicatorTitle={prewarmIndicatorTitle}
