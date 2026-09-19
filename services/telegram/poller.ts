@@ -332,6 +332,8 @@ export function createTelegramPoller(deps: {
       for (const upd of updates) {
         if (upd.updateId > maxUpdateId) maxUpdateId = upd.updateId;
         if (upd.chatId !== cfg.chatId) continue;
+        // 群聊场景下 chatId 相同但发送者不同：enforceUserId 开启时只接受配置的用户
+        if (cfg.enforceUserId === true && cfg.allowedUserId && String(upd.userId || '').trim() !== cfg.allowedUserId) continue;
         const command = parseTelegramCommand(upd.text);
         await deps.onCommand({
           chatId: upd.chatId,

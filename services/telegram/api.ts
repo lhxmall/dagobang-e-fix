@@ -1,6 +1,9 @@
 export type TelegramApiConfig = {
   botToken: string;
   chatId: string;
+  /** 当 enforceUserId 开启时，仅允许该 Telegram 用户 ID 的消息触发交易指令 */
+  allowedUserId?: string;
+  enforceUserId?: boolean;
 };
 
 export type TelegramCommand = {

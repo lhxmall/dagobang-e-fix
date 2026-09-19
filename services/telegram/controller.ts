@@ -213,10 +213,12 @@ export function createTelegramController(deps: {
   };
   const getTelegramConfigFromSettings = async (): Promise<TelegramApiConfig | null> => {
     const settings = await SettingsService.get();
-    const tg = (settings as any).telegram;
-    const cfg = {
+    const tg = settings.telegram;
+    const cfg: TelegramApiConfig = {
       botToken: String(tg?.botToken || '').trim(),
       chatId: String(tg?.chatId || '').trim(),
+      allowedUserId: String(tg?.userId || '').trim(),
+      enforceUserId: tg?.enforceUserId === true,
     };
     if (tg?.enabled !== true) return null;
     return isTelegramConfigured(cfg) ? cfg : null;

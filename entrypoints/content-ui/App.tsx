@@ -1230,6 +1230,9 @@ export default function App() {
       const amount = detail.amountBnb as string | undefined;
       if (!addr || !amount) return;
       if (!settings) return;
+      // 安全：dagobang-quickbuy 事件可能来自页面世界，amount 不可信。
+      // 只接受与设置中的快速买入金额（quickBuy1Bnb/quickBuy2Bnb）完全一致的值，
+      // 防止伪造事件把买入金额改成任意值（如全仓）。
       const chain = normalizeChainName(typeof detail.chain === 'string' ? detail.chain : '')
         || normalizeChainName(parseCurrentUrl(window.location.href)?.chain || '')
         || 'bsc';
@@ -1242,6 +1245,13 @@ export default function App() {
       setSiteInfo(site);
       setIsEditing(false);
       const quickBuyChainId = getChainIdByName(site.chain) || 56;
+      const allowedAmounts = [
+        settings.quickBuy1Bnb,
+        settings.quickBuy2Bnb,
+      ]
+        .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+        .map((v) => v.trim());
+      if (!allowedAmounts.includes(String(amount).trim())) return;
       setDraftBuyPresets(settings.chains[quickBuyChainId]?.buyPresets || ['0.01', '0.2', '0.5', '1.0']);
       setDraftSellPresets(settings.chains[quickBuyChainId]?.sellPresets || ['10', '25', '50', '100']);
       setDraftQuickBuyAdvancedEnabled(!!settings.chains[quickBuyChainId]?.quickBuyAdvancedEnabled);

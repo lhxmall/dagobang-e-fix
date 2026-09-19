@@ -46,7 +46,7 @@ function timingLine(submitElapsedMs?: number, receiptElapsedMs?: number): string
 }
 
 function buildConfig(settings: Settings): TelegramApiConfig | null {
-  const tg = (settings as any).telegram;
+  const tg = settings.telegram;
   if (!tg || tg.enabled !== true) return null;
   const cfg: TelegramApiConfig = {
     botToken: String(tg.botToken || '').trim(),
