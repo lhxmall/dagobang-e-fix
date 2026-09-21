@@ -2,7 +2,9 @@ import { call } from '@/utils/messaging';
 import { initWsMonitorForSite } from './content/ws-processor';
 import { browser } from 'wxt/browser';
 import type { BgGetStateResponse } from '@/types/extention';
+import { ChainId } from '@/constants/chains/chainId';
 import GmgnAPI, { type GmgnPageFetchRequest } from '@/hooks/GmgnAPI';
+import { walkGmgnQuoteLineage } from '@/utils/gmgnQuoteLineage';
 
 const STATE_CHANGE_REFRESH_DEBOUNCE_MS = 300;
 
@@ -217,6 +219,28 @@ export default defineContentScript({
             return { ok: true, list };
           } catch (error: any) {
             return { ok: false, error: String(error?.message || error || 'gmgn_token_pool_fee_info_failed') };
+          }
+        })();
+      }
+      if (message.type === 'bg:gmgn:pageQuoteLineage') {
+        return (async () => {
+          if (!isGmgnHost) return { ok: false, error: 'not_gmgn_page' };
+          try {
+            const chain = typeof message?.chain === 'string' ? message.chain : 'bsc';
+            const tokenAddress = typeof message?.tokenAddress === 'string' ? message.tokenAddress.trim() : '';
+            const targetChainId = Number(message?.chainId) || ChainId.BNB;
+            if (!tokenAddress) return { ok: false, error: 'invalid_token' };
+            const seedTokenInfo = message?.tokenInfo;
+            const lineage = await walkGmgnQuoteLineage({
+              chainId: targetChainId,
+              chain,
+              tokenAddress,
+              tokenInfo: seedTokenInfo,
+              pageFetch: requestGmgnPageFetch,
+            });
+            return { ok: true, lineage };
+          } catch (error: any) {
+            return { ok: false, error: String(error?.message || error || 'gmgn_quote_lineage_failed') };
           }
         })();
       }

@@ -18,4 +18,6 @@ export enum ContractNames {
   PonsV1LegacyFactory = "PonsV1LegacyFactory",
   PonsV2Factory = "PonsV2Factory",
   PonsMemeHook = "PonsMemeHook",
+  GeniusLaunchFactory = "GeniusLaunchFactory",
+  GeniusMemeHook = "GeniusMemeHook",
 }

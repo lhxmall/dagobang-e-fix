@@ -13,7 +13,8 @@ const nativeRouteCache = new Map<string, CachedRoute>();
 const nativeRouteInFlight = new Map<string, Promise<SwapDescLike[] | null>>();
 
 function cacheKey(chainId: number, token: Address): string {
-  return `tradable-res-v1:${chainId}:${String(token || '').trim().toLowerCase()}`;
+  // v3: Genius quote tokens (GENIUS/USDC) use factory Infinity, not DexScreener V2.
+  return `tradable-res-v3:${chainId}:${String(token || '').trim().toLowerCase()}`;
 }
 
 function cloneDescs(descs: SwapDescLike[] | null | undefined): SwapDescLike[] | null {
@@ -81,4 +82,9 @@ export function setOuterMarketRouteInFlight(
 
 export function clearOuterMarketRouteInFlight(chainId: number, token: Address): void {
   nativeRouteInFlight.delete(cacheKey(chainId, token));
+}
+
+export function evictOuterMarketRoute(chainId: number, token: Address): void {
+  nativeRouteInFlight.delete(cacheKey(chainId, token));
+  nativeRouteCache.delete(cacheKey(chainId, token));
 }

@@ -25,6 +25,7 @@ declare global {
   const buildFastQuickTradeRoutePreview: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').buildFastQuickTradeRoutePreview
   const call: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/messaging').call
   const classifyBroadcastError: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').classifyBroadcastError
+  const classifyDexPoolHint: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').classifyDexPoolHint
   const classifyFlapRoute: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').classifyFlapRoute
   const clearCookingLastLaunch: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets').clearCookingLastLaunch
   const collectErrorText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').collectErrorText
@@ -65,6 +66,7 @@ declare global {
   const formatShortAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').formatShortAddress
   const formatTime: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').formatTime
   const getDexPoolPrefer: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').getDexPoolPrefer
+  const getGmgnLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnLineageStore').getGmgnLineage
   const getKnownQuoteTokenSymbol: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').getKnownQuoteTokenSymbol
   const getNonceErrorKindFromText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').getNonceErrorKindFromText
   const getRandomSolanaTipRecipient: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').getRandomSolanaTipRecipient
@@ -81,20 +83,30 @@ declare global {
   const inferLaunchpadFamilyByAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').inferLaunchpadFamilyByAddress
   const injectScript: typeof import('wxt/utils/inject-script').injectScript
   const isAllowanceLikeText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').isAllowanceLikeText
+  const isBscInnerLaunchpadToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').isBscInnerLaunchpadToken
+  const isBytes32PoolId: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').isBytes32PoolId
+  const isEvmInnerLaunchpadToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').isEvmInnerLaunchpadToken
   const isEvmRouteAlignedWithPayToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').isEvmRouteAlignedWithPayToken
   const isFlapPortalOrManagerAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').isFlapPortalOrManagerAddress
   const isFlapSuffixAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').isFlapSuffixAddress
   const isFourMemeSuffixAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').isFourMemeSuffixAddress
+  const isGmgnQuoteLineageUsable: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').isGmgnQuoteLineageUsable
   const isHexPrivateKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').isHexPrivateKey
   const isInFlightLimitLikeText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/txErrorClassify').isInFlightLimitLikeText
+  const isInnerLaunchpad: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').isInnerLaunchpad
   const isLikelyTokenAddressLabel: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').isLikelyTokenAddressLabel
+  const isNonPancakeInfinityV4DexText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').isNonPancakeInfinityV4DexText
   const isObject: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').isObject
+  const isPancakeInfinityDexText: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils').isPancakeInfinityDexText
   const isPlaceholderRouteSymbol: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').isPlaceholderRouteSymbol
+  const isTokenCurrentlyInner: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').isTokenCurrentlyInner
   const isTradeRouteNativeToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').isTradeRouteNativeToken
   const isTradeRouteTerminalQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/tradeRouteTerminals').isTradeRouteTerminalQuote
   const isUsableFlapDexPoolAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').isUsableFlapDexPoolAddress
   const loadContractAbi: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/useContractAbi').loadContractAbi
   const navigateToUrl: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites').navigateToUrl
+  const needsBscGmgnQuoteLineageWalk: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').needsBscGmgnQuoteLineageWalk
+  const needsGmgnQuoteLineageWalk: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').needsGmgnQuoteLineageWalk
   const normalizeFlapLaunchpadStatus: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').normalizeFlapLaunchpadStatus
   const normalizeGmgnChainName: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').normalizeGmgnChainName
   const normalizeHexPrivateKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').normalizeHexPrivateKey
@@ -116,6 +128,7 @@ declare global {
   const parseNumberLoose: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/format').parseNumberLoose
   const parsePlatformTokenLink: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/sites').parsePlatformTokenLink
   const pickFiniteNumber: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickFiniteNumber
+  const pickGmgnPrimaryPoolAddress: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').pickGmgnPrimaryPoolAddress
   const pickMaxFiniteNumber: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickMaxFiniteNumber
   const pickMaxPercentValue: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/value').pickMaxPercentValue
   const planEvmTradeRoute: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').planEvmTradeRoute
@@ -123,18 +136,30 @@ declare global {
   const readCookingLastLaunch: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets').readCookingLastLaunch
   const recoverUniswapV4PoolKey: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/uniswapV4PoolKey').recoverUniswapV4PoolKey
   const rememberCookingLastLaunch: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets').rememberCookingLastLaunch
+  const resolveBscDirectQuoteToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').resolveBscDirectQuoteToken
   const resolveEnabledSolanaSwqosProviderTypes: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveEnabledSolanaSwqosProviderTypes
+  const resolveEvmGmgnDirectQuoteToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').resolveEvmGmgnDirectQuoteToken
   const resolveEvmTradeQuoteToken: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview').resolveEvmTradeQuoteToken
   const resolveFlapPlatform: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').resolveFlapPlatform
   const resolveFlapPlatformByQuoteLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/flap').resolveFlapPlatformByQuoteLineage
+  const resolveGmgnLineagePrefetchQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteCounterparty').resolveGmgnLineagePrefetchQuote
+  const resolveGmgnTokenQuoteCounterparty: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteCounterparty').resolveGmgnTokenQuoteCounterparty
+  const resolveGmgnTokenQuoteCounterpartyQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteCounterparty').resolveGmgnTokenQuoteCounterpartyQuote
+  const resolveMutilWindowDirectQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/mutilWindowTokenInfo').resolveMutilWindowDirectQuote
+  const resolveMutilWindowLineageHop: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/mutilWindowTokenInfo').resolveMutilWindowLineageHop
+  const resolveMutilWindowLineagePrefetchQuote: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/mutilWindowTokenInfo').resolveMutilWindowLineagePrefetchQuote
   const resolveQuoteFromDexScreenerPool: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/officialPoolQuote').resolveQuoteFromDexScreenerPool
   const resolveRouteTokenLabel: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quoteTokenLabels').resolveRouteTokenLabel
   const resolveSingleEnabledSolanaTipProvider: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveSingleEnabledSolanaTipProvider
   const resolveSolanaTipConfig: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/solanaTip').resolveSolanaTipConfig
   const resolveTokenLaunchpadPlatform: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily').resolveTokenLaunchpadPlatform
   const resolveTrenchesStageByFid: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').resolveTrenchesStageByFid
+  const setGmgnLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnLineageStore').setGmgnLineage
+  const shouldRefreshGmgnQuoteLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').shouldRefreshGmgnQuoteLineage
   const shouldUseMergedTokenValue: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').shouldUseMergedTokenValue
+  const shouldWalkGmgnQuoteLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').shouldWalkGmgnQuoteLineage
   const storage: typeof import('wxt/utils/storage').storage
+  const supportsGmgnMutilWindowLineageChain: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').supportsGmgnMutilWindowLineageChain
   const t: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/i18n').t
   const toArrayPayload: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs').toArrayPayload
   const useAppConfig: typeof import('wxt/utils/app-config').useAppConfig
@@ -147,7 +172,10 @@ declare global {
   const useRef: typeof import('react').useRef
   const useState: typeof import('react').useState
   const useTradeSuccessSound: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/hooks/useTradeSuccessSound').useTradeSuccessSound
+  const usesBscMutilWindowDirectTerminalMarket: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').usesBscMutilWindowDirectTerminalMarket
+  const usesMutilWindowDirectTerminalMarket: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/bscTradeRoutePolicy').usesMutilWindowDirectTerminalMarket
   const validateSettings: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/validate').validateSettings
+  const walkGmgnQuoteLineage: typeof import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnQuoteLineage').walkGmgnQuoteLineage
 }
 // for type re-export
 declare global {
@@ -200,6 +228,9 @@ declare global {
   export type { CookingLastLaunch } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/cookingLaunchWallets')
   // @ts-ignore
+  export type { DexPoolPreferHint } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils'
+  import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/dexUtils')
+  // @ts-ignore
   export type { TrenchesStage } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/gmgnWs')
   // @ts-ignore
@@ -208,6 +239,9 @@ declare global {
   // @ts-ignore
   export type { LaunchpadFamily } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/launchpadFamily')
+  // @ts-ignore
+  export type { MutilWindowPool, MutilWindowTpool, MutilWindowTokenRow, MutilWindowLineageHopSource, MutilWindowLineageHop } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/mutilWindowTokenInfo'
+  import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/mutilWindowTokenInfo')
   // @ts-ignore
   export type { EvmTradeRouteHopKind, EvmTradeRoutePlanHop, EvmTradeRoutePlan } from '/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview'
   import('/home/catgroup/projects/remote/meme/dagobang/dagobang-extention/utils/quickTradeRoutePreview')

@@ -41,6 +41,10 @@ export interface TokenInfo {
   tpool_exchange?: string;
   tpool_launch_type?: string;
   tpool_pool_address?: string;
+  /** mutil_window pool.factory — authoritative V2/V3 factory for the primary pair. */
+  pool_factory?: string;
+  /** mutil_window pool.exchange — e.g. pancake_v3, uniswap_v3. */
+  pool_exchange?: string;
   dex_type?: string;
   tokenPrice?: {
     price: string;

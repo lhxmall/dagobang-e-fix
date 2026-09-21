@@ -32,6 +32,16 @@ const erc20AbiLite = parseAbi([
   'function balanceOf(address owner) view returns (uint256)',
 ]);
 
+function inheritLimitOrderTradeContext(order: LimitOrder) {
+  return {
+    gmgnQuoteLineage: order.gmgnQuoteLineage,
+    gmgnLineageLaunchpadStatus: order.gmgnLineageLaunchpadStatus,
+    tradeRouteDescs: order.tradeRouteDescs,
+    tradeRoutePreview: order.tradeRoutePreview,
+    tradeRouteLaunchpadStatus: order.tradeRouteLaunchpadStatus,
+  };
+}
+
 export const tickLimitOrdersForToken = async (input: {
   chainId: number;
   tokenAddress: ChainAddress;
@@ -200,6 +210,9 @@ export const createLimitOrderExecutor = (deps: {
     };
     const tokenInfo = await resolveLatestTokenInfo();
     if (!tokenInfo) throw new Error('Token info required');
+    if (order.chainId !== ChainId.SOL && !order.tradeRouteDescs?.length) {
+      throw new Error('挂单路由未就绪，等待路由刷新');
+    }
     if (order.side === 'buy') {
       const buyAmountWei = order.buyNativeAmountWei || order.buyBnbAmountWei;
       if (!buyAmountWei) throw new Error('Buy amount required');
@@ -212,6 +225,7 @@ export const createLimitOrderExecutor = (deps: {
         baseTokenAddress: order.baseTokenAddress,
         fromAddress: order.fromAddress,
         tokenInfo,
+        preparedRouteDescs: order.tradeRouteDescs,
       }, {
         maxRetry: 1,
         onSubmitted: (ctx) => {
@@ -246,7 +260,14 @@ export const createLimitOrderExecutor = (deps: {
           entryPriceUsd: basePriceUsd,
         });
         for (const o of orders) {
-          await createLimitOrder({ ...o, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+          await createLimitOrder({
+            ...o,
+            fromAddress: order.fromAddress,
+            baseTokenAddress: order.baseTokenAddress,
+            // Inherit the buy order's GMGN lineage so the auto-sell orders
+            // (executing later, possibly after SW restart) re-seed the cache.
+            ...inheritLimitOrderTradeContext(order),
+          });
           created += 1;
         }
         const mode = (config as any)?.trailingStop?.activationMode ?? 'after_first_take_profit';
@@ -264,7 +285,7 @@ export const createLimitOrderExecutor = (deps: {
               entryPriceUsd,
             });
             if (rolling) {
-              await createLimitOrder({ ...rolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+              await createLimitOrder({ ...rolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
               created += 1;
             }
             const floor = buildStrategyRollingFloorOrderInputs({
@@ -276,7 +297,7 @@ export const createLimitOrderExecutor = (deps: {
               entryPriceUsd,
             });
             if (floor) {
-              await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+              await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
               created += 1;
             }
           } else {
@@ -289,7 +310,7 @@ export const createLimitOrderExecutor = (deps: {
               basePriceUsd,
             });
             if (trailing) {
-              await createLimitOrder({ ...trailing, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+              await createLimitOrder({ ...trailing, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
               created += 1;
             }
           }
@@ -332,6 +353,7 @@ export const createLimitOrderExecutor = (deps: {
       fromAddress: order.fromAddress,
       tokenInfo,
       sellPercentBps: Number.isFinite(percentBps) && percentBps > 0 && percentBps <= 10000 ? percentBps : undefined,
+      preparedRouteDescs: order.tradeRouteDescs,
     } as const;
 
     const firstSell = await getTradeExecutor(order.chainId).sellWithReceiptAndAutoRecovery(sellInput, {
@@ -374,7 +396,7 @@ export const createLimitOrderExecutor = (deps: {
           basePriceUsd,
           entryPriceUsd: Number.isFinite(entryPriceUsd) && entryPriceUsd > 0 ? entryPriceUsd : basePriceUsd,
         });
-        if (nextRolling) await createLimitOrder({ ...nextRolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+        if (nextRolling) await createLimitOrder({ ...nextRolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
 
         if (Number.isFinite(entryPriceUsd) && entryPriceUsd > 0) {
           const floor = buildStrategyRollingFloorOrderInputs({
@@ -385,7 +407,7 @@ export const createLimitOrderExecutor = (deps: {
             tokenInfo,
             entryPriceUsd,
           });
-          if (floor) await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+          if (floor) await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
         }
         deps.onOrdersChanged();
       } else if (type === 'take_profit_sell' && percentBps > 0 && percentBps < 10000) {
@@ -438,7 +460,7 @@ export const createLimitOrderExecutor = (deps: {
                 entryPriceUsd,
               });
               if (nextRolling) {
-                await createLimitOrder({ ...nextRolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+                await createLimitOrder({ ...nextRolling, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
               }
               const floor = buildStrategyRollingFloorOrderInputs({
                 config,
@@ -448,7 +470,7 @@ export const createLimitOrderExecutor = (deps: {
                 tokenInfo,
                 entryPriceUsd,
               });
-              if (floor) await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+              if (floor) await createLimitOrder({ ...floor, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
               deps.onOrdersChanged();
             } else {
                 const basePriceUsd = Number(ctx?.priceUsd ?? order.triggerPriceUsd);
@@ -461,7 +483,7 @@ export const createLimitOrderExecutor = (deps: {
                 basePriceUsd,
               });
               if (input) {
-                await createLimitOrder({ ...input, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress });
+                await createLimitOrder({ ...input, fromAddress: order.fromAddress, baseTokenAddress: order.baseTokenAddress, ...inheritLimitOrderTradeContext(order) });
                 deps.onOrdersChanged();
               }
             }

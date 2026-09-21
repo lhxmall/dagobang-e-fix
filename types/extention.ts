@@ -516,6 +516,10 @@ export type TxBuyInput = {
   openFourOptions?: string;
   openFourProof?: `0x${string}`;
   tokenInfo?: TokenInfo;
+  /** Limit-order execution: use stored topology instead of re-resolving route. */
+  preparedRouteDescs?: LimitOrderSwapDesc[];
+  /** Re-seed GMGN lineage cache before route resolution (page-resolved snapshot). */
+  gmgnQuoteLineage?: GmgnQuoteLineageEntry[];
 };
 
 export type TxSellInput = {
@@ -541,6 +545,8 @@ export type TxSellInput = {
   openFourOptions?: string;
   openFourProof?: `0x${string}`;
   tokenInfo?: TokenInfo;
+  preparedRouteDescs?: LimitOrderSwapDesc[];
+  gmgnQuoteLineage?: GmgnQuoteLineageEntry[];
 };
 
 export type CookingAutoBuyWalletInput = {
@@ -571,6 +577,21 @@ export type LimitOrderType = 'take_profit_sell' | 'stop_loss_sell' | 'trailing_s
 
 export type LimitOrderStatus = 'open' | 'triggered' | 'executed' | 'failed' | 'cancelled';
 
+/** Serializable swap hop — same shape as TradeService SwapDescLike. */
+export type LimitOrderSwapDesc = {
+  swapType: number;
+  tokenIn: `0x${string}`;
+  tokenOut: `0x${string}`;
+  poolAddress: `0x${string}`;
+  fee: number;
+  tickSpacing: number;
+  hooks: `0x${string}`;
+  hookData: `0x${string}`;
+  poolManager: `0x${string}`;
+  parameters: `0x${string}`;
+  data: `0x${string}`;
+};
+
 export type LimitOrder = {
   id: string;
   chainId: number;
@@ -599,6 +620,24 @@ export type LimitOrder = {
   retryCount?: number;
   retryAtMs?: number;
   tokenInfo?: TokenInfo;
+  /**
+   * GMGN quote lineage resolved in the page main world at order-creation time.
+   * The executor re-seeds from this only when it still matches the fresh
+   * tokenInfo (same launchpad_status / pool / non-terminal quote). After
+   * inner→outer graduation the snapshot is discarded and re-walked via a
+   * GMGN page tab — never used as an expired DEX route.
+   */
+  gmgnQuoteLineage?: GmgnQuoteLineageEntry[];
+  /**
+   * launchpad_status at the moment gmgnQuoteLineage was captured. Used to
+   * detect inner→outer graduation even after order.tokenInfo is refreshed.
+   */
+  gmgnLineageLaunchpadStatus?: number;
+  /** Route topology frozen on the order — same prepareEvmTradeRoute result as manual trade. */
+  tradeRouteDescs?: LimitOrderSwapDesc[];
+  tradeRoutePreview?: QuickTradeRoutePreview;
+  /** launchpad_status when tradeRouteDescs was captured (inner→outer triggers one rebuild). */
+  tradeRouteLaunchpadStatus?: number;
 };
 
 export type LimitOrderCreateInput = {
@@ -622,6 +661,11 @@ export type LimitOrderCreateInput = {
   sellPercentBps?: number;
   sellTokenAmountWei?: string;
   tokenInfo?: TokenInfo;
+  gmgnQuoteLineage?: GmgnQuoteLineageEntry[];
+  gmgnLineageLaunchpadStatus?: number;
+  tradeRouteDescs?: LimitOrderSwapDesc[];
+  tradeRoutePreview?: QuickTradeRoutePreview;
+  tradeRouteLaunchpadStatus?: number;
 };
 
 export type LimitOrderScanStatus = {
@@ -839,6 +883,17 @@ export type XSniperBuyRecord = {
   reason?: string;
 };
 
+export type GmgnQuoteLineageEntry = {
+  token: ChainAddress;
+  quote: ChainAddress;
+  poolAddress: string;
+  preferHint: 'v2' | 'v3' | 'v4' | null;
+  /** mutil_window pool.factory for this hop's pair contract. */
+  poolFactory?: string | null;
+  /** mutil_window pool.exchange (uniswap_v3, pancake_v2, …). */
+  exchange?: string | null;
+};
+
 export type TradeTurboPrewarmInput = {
   chainId: number;
   tokenAddress: ChainAddress;
@@ -847,6 +902,20 @@ export type TradeTurboPrewarmInput = {
   submitChannel?: SubmitChannel;
   platform?: string;
   baseTokenAddress?: ChainAddress;
+  /**
+   * Pre-resolved GMGN quote lineage (token→quote→…→terminal) built in the
+   * content-script main world (where GMGN auth cookies are available) and
+   * passed to the background so prewarmTurbo never fetches GMGN directly
+   * (which would CORS/cookie-timeout in the background service worker).
+   */
+  gmgnQuoteLineage?: GmgnQuoteLineageEntry[];
+  /** Override prepareEvmTradeRoute wait budget (ms). Omit for UI default; execution uses longer. */
+  prepareBudgetMs?: number;
+};
+
+export type TradeTurboPrewarmResult = {
+  preview: QuickTradeRoutePreview;
+  routeDescs: LimitOrderSwapDesc[];
 };
 
 export type QuickTradeRouteHop = {
@@ -1287,7 +1356,7 @@ export type BgResponse<T extends BgRequest> = T extends { type: 'bg:ping' }
   : T extends { type: 'rpc:resetProfiles' }
   ? { ok: true }
   : T extends { type: 'trade:prewarmTurbo' }
-  ? { ok: true; route: QuickTradeRoutePreview | null }
+  ? { ok: true; route: QuickTradeRoutePreview | null; routeDescs?: LimitOrderSwapDesc[] | null }
   : T extends { type: 'trade:previewRoute' }
   ? { ok: true; route: QuickTradeRoutePreview | null }
   : T extends { type: 'trade:refreshNonce' }

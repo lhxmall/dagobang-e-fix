@@ -231,6 +231,15 @@ export const createLimitOrder = async (input: LimitOrderCreateInput) => {
     createdAtMs: Date.now(),
     status: 'open',
     tokenInfo: input.tokenInfo,
+    gmgnQuoteLineage: input.gmgnQuoteLineage,
+    gmgnLineageLaunchpadStatus: Number.isFinite(Number(input.gmgnLineageLaunchpadStatus))
+      ? Number(input.gmgnLineageLaunchpadStatus)
+      : (input.gmgnQuoteLineage?.length && Number.isFinite(Number(input.tokenInfo?.launchpad_status))
+        ? Number(input.tokenInfo?.launchpad_status)
+        : undefined),
+    tradeRouteDescs: input.tradeRouteDescs,
+    tradeRoutePreview: input.tradeRoutePreview,
+    tradeRouteLaunchpadStatus: input.tradeRouteLaunchpadStatus,
   };
 
   await setLimitOrders([order, ...all]);

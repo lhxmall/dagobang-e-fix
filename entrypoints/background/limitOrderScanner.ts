@@ -1,5 +1,9 @@
 import { browser } from 'wxt/browser';
 import { ChainId } from '@/constants/chains/chainId';
+import {
+  refreshLimitOrderRouteForToken,
+  shouldRefreshLimitOrderRoute,
+} from '@/services/limitOrders/routeTopology';
 import { SettingsService } from '@/services/settings';
 import { TokenService } from '@/services/token';
 import { getLimitOrders } from '@/services/storage';
@@ -22,7 +26,6 @@ const LIMIT_SCAN_INTERVAL_DEFAULT_MS = 3000;
 const LIMIT_SCAN_INTERVAL_OPTIONS_MS = [1000, 3000, 5000, 10000, 30000, 60000, 120000] as const;
 const ORDER_EXECUTE_MAX_RETRY = 2;
 const EXTERNAL_PRICE_TTL_MS = 10000;
-
 const isRetryableOrderError = (rawMessage: string) => {
   const msg = rawMessage.toLowerCase();
   return (
@@ -34,7 +37,12 @@ const isRetryableOrderError = (rawMessage: string) => {
     msg.includes('already known') ||
     msg.includes('temporarily unavailable') ||
     msg.includes('429') ||
-    msg.includes('503')
+    msg.includes('503') ||
+    msg.includes('路由未就绪') ||
+    msg.includes('路由尚未就绪') ||
+    msg.includes('报价路径尚未就绪') ||
+    msg.includes('官方报价路径尚未就绪') ||
+    msg.includes('挂单路由未就绪')
   );
 };
 
@@ -162,13 +170,33 @@ export const createLimitOrderScanner = (deps: {
         for (const order of orders) {
           deps.onObserveOrder?.({ order, tokenInfo: resolvedTokenInfo ?? order.tokenInfo ?? null });
         }
-        if (resolvedTokenInfo && JSON.stringify(tokenInfo ?? null) !== JSON.stringify(resolvedTokenInfo)) {
+        const tokenInfoChanged = !!(resolvedTokenInfo && JSON.stringify(tokenInfo ?? null) !== JSON.stringify(resolvedTokenInfo));
+        if (tokenInfoChanged) {
           entry.tokenInfo = resolvedTokenInfo;
           for (const order of orders) {
             if (JSON.stringify(order.tokenInfo ?? null) === JSON.stringify(resolvedTokenInfo)) continue;
             await patchLimitOrder(order.id, { tokenInfo: resolvedTokenInfo });
             changed = true;
           }
+        }
+        if (
+          chainId !== ChainId.SOL
+          && resolvedTokenInfo
+          && orders.length
+          && shouldRefreshLimitOrderRoute(tokenInfo, resolvedTokenInfo, orders)
+        ) {
+          const routeAnchor = orders.find((o) => o.gmgnQuoteLineage?.length) ?? orders[0];
+          const baseTokenAddress = orders.find((o) => o.baseTokenAddress)?.baseTokenAddress;
+          void refreshLimitOrderRouteForToken({
+            chainId,
+            tokenAddress,
+            tokenInfo: resolvedTokenInfo,
+            previousTokenInfo: tokenInfo,
+            baseTokenAddress,
+            gmgnQuoteLineageHint: routeAnchor?.gmgnQuoteLineage,
+          }).then((refreshed) => {
+            if (refreshed) changed = true;
+          }).catch(() => { });
         }
         let priceUsd = 0;
         let resolvedPriceSource: 'rpc' | 'gmgn' | 'external' | 'site' = 'rpc';

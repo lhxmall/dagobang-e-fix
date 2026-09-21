@@ -697,7 +697,17 @@ export class TokenAPI {
                                     );
                                 }
                             } else {
-                                nextValue = parallelFlapInfoPromise ? await parallelFlapInfoPromise : null;
+                              // Plain/outer DEX tokens (empty launchpad): keep GMGN/Axiom info.
+                              // Dropping it forced DexScreener fallback and wiped Infinity poolIds
+                              // (e.g. GENIUS biggest_pool bytes32 → Uniswap USDT V3 pair).
+                              if (parallelFlapInfoPromise) {
+                                const flapInfo = await parallelFlapInfoPromise.catch(() => null);
+                                nextValue = flapInfo
+                                  ? (this.mergeFlapEnrichedTokenInfo(tokenInfo, flapInfo) ?? tokenInfo)
+                                  : tokenInfo;
+                              } else {
+                                nextValue = tokenInfo;
+                              }
                             }
                             }
                         }

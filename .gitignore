@@ -139,3 +139,4 @@ dist
 *.pem
 .output
 .dbg
+/docs
