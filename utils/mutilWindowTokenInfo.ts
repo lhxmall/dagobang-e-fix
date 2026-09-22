@@ -54,6 +54,13 @@ function normalizeAddress(value?: string | null): string | null {
   return raw;
 }
 
+/** Quote may be native (0x0). V4 pairs on RH use that for ETH, not WETH. */
+function normalizeQuoteAddress(value?: string | null): string | null {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(raw)) return null;
+  return raw;
+}
+
 function normalizePoolRef(value?: string | null): string | null {
   const raw = String(value || '').trim();
   if (isBytes32PoolId(raw)) return raw.toLowerCase();
@@ -98,7 +105,7 @@ export function resolveMutilWindowLineageHop(
   const pool = row.pool;
   const tpool = row.tpool;
   const poolBase = normalizeAddress(pool?.base_address) ?? normalizeAddress(pool?.address);
-  const poolQuote = normalizeAddress(pool?.quote_address);
+  const poolQuote = normalizeQuoteAddress(pool?.quote_address);
 
   if (poolBase === self && poolQuote && poolQuote !== self) {
     const poolAddress = pickLineageHopPoolAddress(pool, tpool, row.biggest_pool_address, 'pool_quote');
@@ -117,7 +124,7 @@ export function resolveMutilWindowLineageHop(
   }
 
   const tpoolBase = normalizeAddress(tpool?.base_address);
-  const tpoolQuote = normalizeAddress(tpool?.quote_address);
+  const tpoolQuote = normalizeQuoteAddress(tpool?.quote_address);
   if (tpoolBase === self && tpoolQuote && tpoolQuote !== self) {
     const poolAddress = pickLineageHopPoolAddress(pool, tpool, row.biggest_pool_address, 'tpool_quote');
     if (!poolAddress) return null;

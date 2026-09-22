@@ -49,6 +49,9 @@ export function isBscInnerLaunchpadToken(chainId: number, tokenInfo: TokenInfo):
 export function resolveEvmGmgnDirectQuoteToken(chainId: number, tokenInfo: TokenInfo): `0x${string}` | null {
   if (!supportsGmgnMutilWindowLineageChain(chainId)) return null;
   const self = normalizeAddress(tokenInfo.address);
+  const rawQuote = String(tokenInfo.quote_token_address || '').trim().toLowerCase();
+  // Uniswap V4 native pairs (RH ETH) use 0x0. That is a terminal quote, not "missing".
+  if (rawQuote === ZERO_ADDRESS) return ZERO_ADDRESS as `0x${string}`;
   const raw = normalizeAddress(tokenInfo.quote_token_address);
   if (raw && self && raw !== self) return raw;
   return raw;

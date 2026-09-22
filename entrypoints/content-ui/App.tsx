@@ -704,6 +704,9 @@ export default function App() {
   const approveStatusRefreshSeqRef = useRef(0);
   const tokenRefreshSeqRef = useRef(0);
   const gmgnHoldingRefreshSeqRef = useRef(0);
+  const gmgnHoldingStatsRef = useRef<GmgnHoldingStats | null>(null);
+  const gmgnHoldingZeroStreakRef = useRef(0);
+  const gmgnHoldingHadBalanceRef = useRef(false);
   const solBaseBalanceRefreshSeqRef = useRef(0);
   const solTokenBalanceRefreshSeqRef = useRef(0);
   const gmgnHoldingPollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3140,7 +3143,7 @@ export default function App() {
             nextHoldingRaw = result.value ?? '0';
             resolvedHoldingCount += 1;
           }
-          if (isSolana) {
+          {
             let prevActual = 0n;
             let nextActual = 0n;
             const prevActualRaw = prevActualByWallet[addrLower] || '0';
@@ -3151,14 +3154,24 @@ export default function App() {
               prevActual = 0n;
               nextActual = 0n;
             }
-            const pendingDelta = getPendingSolTokenDeltaWei(tokenAddressNormalized, addr);
-            const expectedRemaining = prevActual + pendingDelta;
-            const isTransientZeroAfterPartialSell =
+            if (isSolana) {
+              const pendingDelta = getPendingSolTokenDeltaWei(tokenAddressNormalized, addr);
+              const expectedRemaining = prevActual + pendingDelta;
+              const isTransientZeroAfterPartialSell =
+                nextActual === 0n
+                && prevActual > 0n
+                && pendingDelta < 0n
+                && expectedRemaining > 0n;
+              if (isTransientZeroAfterPartialSell) {
+                nextHoldingRaw = prevActual.toString();
+              }
+            } else if (
               nextActual === 0n
               && prevActual > 0n
-              && pendingDelta < 0n
-              && expectedRemaining > 0n;
-            if (isTransientZeroAfterPartialSell) {
+              && result?.status === 'fulfilled'
+              && !!fastPollingRef.current
+            ) {
+              // GMGN/onchain can briefly return 0 right after a partial sell on EVM.
               nextHoldingRaw = prevActual.toString();
             }
           }
@@ -3280,6 +3293,18 @@ export default function App() {
         : await GmgnAPI.getWalletsHolding(gmgnHoldingChain, tokenAddressNormalized, gmgnHoldingWallets) as GmgnTokenHolding[];
       if (seq !== gmgnHoldingRefreshSeqRef.current) return;
       const nextStats = aggregateGmgnHoldings(holdings);
+      const nextBalanceUsd = nextStats?.balanceUsd ?? 0;
+      const prevBalanceUsd = gmgnHoldingStatsRef.current?.balanceUsd ?? 0;
+      if (nextBalanceUsd <= 0 && prevBalanceUsd > 0) {
+        gmgnHoldingZeroStreakRef.current += 1;
+        // GMGN often returns balance 0 for a few seconds after a partial sell.
+        // Keep the last position and keep polling until the remaining balance comes back.
+        setGmgnHoldingPollingEnabled(true);
+        if (gmgnHoldingZeroStreakRef.current < 5) return;
+      } else {
+        gmgnHoldingZeroStreakRef.current = 0;
+      }
+      if (nextBalanceUsd > 0) gmgnHoldingHadBalanceRef.current = true;
       const derivedPrices = holdings
         .map((item) => resolveHoldingUnitPriceUsd(item))
         .filter((item): item is number => item != null && Number.isFinite(item) && item > 0)
@@ -3302,18 +3327,25 @@ export default function App() {
           return sum;
         }
       }, 0n).toString();
+      gmgnHoldingStatsRef.current = nextStats;
       setGmgnHoldingStats(nextStats);
       setGmgnHoldingTokenPriceUsd(derivedPrice);
       setGmgnHoldingTokenBalanceWei(derivedBalanceWei);
       setGmgnHoldingTokenDecimals(derivedDecimals);
       setGmgnHoldingTokenSymbol(derivedSymbol);
-      setGmgnHoldingPollingEnabled(holdings.some((item) => (parseGmgnNullableNumber(item.balance) ?? 0) > 0));
+      const hasLiveBalance = holdings.some((item) => (parseGmgnNullableNumber(item.balance) ?? 0) > 0);
+      setGmgnHoldingPollingEnabled(hasLiveBalance || gmgnHoldingHadBalanceRef.current);
     } catch (e: any) {
       if (seq !== gmgnHoldingRefreshSeqRef.current) return;
       console.warn('[quickTrade.gmgnHolding.refresh.failed]', {
         source,
         error: String(e?.message || e || ''),
       });
+      if ((gmgnHoldingStatsRef.current?.balanceUsd ?? 0) > 0 || gmgnHoldingHadBalanceRef.current) {
+        setGmgnHoldingPollingEnabled(true);
+        return;
+      }
+      gmgnHoldingStatsRef.current = null;
       setGmgnHoldingStats(null);
       setGmgnHoldingTokenPriceUsd(null);
       setGmgnHoldingTokenBalanceWei(null);
@@ -3336,6 +3368,9 @@ export default function App() {
   }, [siteInfo, shouldKeepTokenWarm]);
 
   useEffect(() => {
+    gmgnHoldingZeroStreakRef.current = 0;
+    gmgnHoldingHadBalanceRef.current = false;
+    gmgnHoldingStatsRef.current = null;
     if (!shouldEnableHoldingStats || !gmgnHoldingChain) {
       clearGmgnHoldingPollingTimer();
       setGmgnHoldingStats(null);
@@ -3675,8 +3710,7 @@ export default function App() {
           receiptElapsedMs: Number(message?.receiptElapsedMs ?? 0),
         });
         if (
-          message?.chainId === ChainId.SOL
-          && rawAddr
+          rawAddr
           && rawAddr.toLowerCase() === String(tokenAddressNormalized || '').toLowerCase()
         ) {
           void refreshGmgnHoldingStats(true, 'tradeSuccess');
@@ -3773,8 +3807,7 @@ export default function App() {
         const submitNode = null;
         const timing = formatTradeTiming({ submitElapsedMs: Number(message?.submitElapsedMs ?? 0) }, true);
         if (
-          message?.chainId === ChainId.SOL
-          && rawAddr
+          rawAddr
           && rawAddr.toLowerCase() === String(tokenAddressNormalized || '').toLowerCase()
         ) {
           void refreshGmgnHoldingStats(true, 'tradeSubmitted');

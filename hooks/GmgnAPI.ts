@@ -1804,6 +1804,9 @@ export class GmgnAPI {
     ) {
       return 'UNISWAP_V3';
     }
+    if (lower === 'uniswap_v4' || lower === 'uniswapv4') {
+      return 'UNISWAP_V4';
+    }
     return undefined;
   }
 
