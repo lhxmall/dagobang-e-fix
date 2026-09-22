@@ -22,6 +22,7 @@ import {
   tryAcquireLimitOrderExecutionLock,
 } from './store';
 import { extractRevertReasonFromError, tryGetReceiptRevertReason } from '@/services/tx/errors';
+import { ensureLimitOrderRoutesReady } from '@/services/limitOrders/routeTopology';
 import { createTokenInfoResolvers } from '@/services/xSniper/engine/tokenInfoResolver';
 import type { LimitOrder } from '@/types/extention';
 import { getTradeExecutor, getWalletAdapter } from '@/services/chain/registry';
@@ -94,8 +95,12 @@ export const tickLimitOrdersForToken = async (input: {
     } catch (e: any) {
       const msg = typeof e?.message === 'string' ? e.message : String(e);
       const nextRetryCount = Math.max(0, Math.floor(Number(prepared.retryCount) || 0)) + 1;
-      if (nextRetryCount <= 2) {
-        const backoffMs = nextRetryCount === 1 ? 1000 : 3000;
+      const routeNotReady = msg.includes('挂单路由未就绪');
+      const maxRetries = routeNotReady ? 8 : 2;
+      if (nextRetryCount <= maxRetries) {
+        const backoffMs = routeNotReady
+          ? Math.min(30_000, nextRetryCount * 5_000)
+          : (nextRetryCount === 1 ? 1000 : 3000);
         await patchLimitOrder(o.id, {
           status: 'open' as const,
           retryCount: nextRetryCount,
@@ -210,8 +215,21 @@ export const createLimitOrderExecutor = (deps: {
     };
     const tokenInfo = await resolveLatestTokenInfo();
     if (!tokenInfo) throw new Error('Token info required');
-    if (order.chainId !== ChainId.SOL && !order.tradeRouteDescs?.length) {
-      throw new Error('挂单路由未就绪，等待路由刷新');
+    let workingOrder = order;
+    if (order.chainId !== ChainId.SOL) {
+      await ensureLimitOrderRoutesReady({
+        chainId: order.chainId,
+        tokenAddress: order.tokenAddress,
+        tokenInfo,
+        previousTokenInfo: order.tokenInfo ?? null,
+        baseTokenAddress: order.baseTokenAddress,
+        gmgnQuoteLineageHint: order.gmgnQuoteLineage,
+      }).catch(() => null);
+      const reloaded = (await getLimitOrders()).find((o) => o.id === order.id);
+      if (reloaded) workingOrder = reloaded;
+      if (!workingOrder.tradeRouteDescs?.length) {
+        throw new Error('挂单路由未就绪，等待路由刷新');
+      }
     }
     if (order.side === 'buy') {
       const buyAmountWei = order.buyNativeAmountWei || order.buyBnbAmountWei;
@@ -225,15 +243,15 @@ export const createLimitOrderExecutor = (deps: {
         baseTokenAddress: order.baseTokenAddress,
         fromAddress: order.fromAddress,
         tokenInfo,
-        preparedRouteDescs: order.tradeRouteDescs,
+        preparedRouteDescs: workingOrder.tradeRouteDescs,
       }, {
         maxRetry: 1,
         onSubmitted: (ctx) => {
-          deps.onOrderTxSubmitted?.({ order, txHash: ctx.txHash, submitElapsedMs: ctx.submitElapsedMs });
+          deps.onOrderTxSubmitted?.({ order: workingOrder, txHash: ctx.txHash, submitElapsedMs: ctx.submitElapsedMs });
         },
       });
       const txHash = res.txHash;
-      await patchLimitOrder(order.id, { txHash });
+      await patchLimitOrder(workingOrder.id, { txHash });
       deps.onOrderSubmitted?.({
         order,
         txHash,
@@ -353,20 +371,20 @@ export const createLimitOrderExecutor = (deps: {
       fromAddress: order.fromAddress,
       tokenInfo,
       sellPercentBps: Number.isFinite(percentBps) && percentBps > 0 && percentBps <= 10000 ? percentBps : undefined,
-      preparedRouteDescs: order.tradeRouteDescs,
+      preparedRouteDescs: workingOrder.tradeRouteDescs,
     } as const;
 
-    const firstSell = await getTradeExecutor(order.chainId).sellWithReceiptAndAutoRecovery(sellInput, {
+    const firstSell = await getTradeExecutor(workingOrder.chainId).sellWithReceiptAndAutoRecovery(sellInput, {
       maxRetry: 1,
       timeoutMs: 20_000,
       onSubmitted: (ctx) => {
-        deps.onOrderTxSubmitted?.({ order, txHash: ctx.txHash, submitElapsedMs: ctx.submitElapsedMs });
+        deps.onOrderTxSubmitted?.({ order: workingOrder, txHash: ctx.txHash, submitElapsedMs: ctx.submitElapsedMs });
       },
     });
     let { txHash } = firstSell;
-    await patchLimitOrder(order.id, { txHash });
+    await patchLimitOrder(workingOrder.id, { txHash });
     deps.onOrderSubmitted?.({
-      order,
+      order: workingOrder,
       txHash,
       submitElapsedMs: (firstSell as any)?.submitElapsedMs,
       receiptElapsedMs: (firstSell as any)?.receiptElapsedMs,

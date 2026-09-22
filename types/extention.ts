@@ -1168,6 +1168,7 @@ export type BgRequest =
   | { type: 'newpool:clearCache' }
   | { type: 'limitOrder:list'; chainId: number; tokenAddress?: ChainAddress }
   | { type: 'limitOrder:create'; input: LimitOrderCreateInput }
+  | { type: 'limitOrder:createBatch'; inputs: LimitOrderCreateInput[] }
   | { type: 'limitOrder:cancel'; id: string }
   | { type: 'limitOrder:cancelAll'; chainId: number; tokenAddress?: ChainAddress; fromAddress?: ChainAddress }
   | { type: 'limitOrder:clearExecuted'; chainId: number; tokenAddress?: ChainAddress }
@@ -1477,6 +1478,8 @@ export type BgResponse<T extends BgRequest> = T extends { type: 'bg:ping' }
   ? { ok: true; orders: LimitOrder[] }
   : T extends { type: 'limitOrder:create' }
   ? { ok: true; order: LimitOrder }
+  : T extends { type: 'limitOrder:createBatch' }
+  ? { ok: true; orders: LimitOrder[] }
   : T extends { type: 'limitOrder:cancel' }
   ? { ok: true; orders: LimitOrder[] }
   : T extends { type: 'limitOrder:cancelAll' }

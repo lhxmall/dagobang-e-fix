@@ -607,17 +607,21 @@ export class TradeService {
     baseTokenAddress?: Address;
     gmgnQuoteLineageHint?: GmgnQuoteLineageEntry[];
     fetchGmgnLineage?: () => Promise<GmgnQuoteLineageEntry[] | null>;
+    prepareBudgetMs?: number;
   }): Promise<PreparedEvmTradeRoute | null> {
+    const prepareBudgetMs = typeof input.prepareBudgetMs === 'number'
+      ? input.prepareBudgetMs
+      : 15_000;
     await this.prewarmTradeRouteForToken({
       ...input,
-      prepareBudgetMs: 15_000,
+      prepareBudgetMs,
     });
     return this.prepareEvmTradeRoute({
       chainId: input.chainId,
       tokenAddress: input.tokenAddress,
       tokenInfo: input.tokenInfo,
       baseTokenAddress: input.baseTokenAddress,
-      prepareBudgetMs: 15_000,
+      prepareBudgetMs,
     });
   }
 
@@ -2234,7 +2238,7 @@ export class TradeService {
     };
   }
 
-  /** Outer-market V2/V3 topology produced by prepareEvmTradeRoute — safe to submit as-is. */
+  /** Outer-market V2/V3 topology from prepareEvmTradeRoute — same hops for buy (forward) and sell (reversed). */
   private static isStandardPreparedDexBuyRoute(
     chainId: number,
     descs: SwapDescLike[] | null | undefined,
@@ -2334,6 +2338,61 @@ export class TradeService {
       });
     }
     return { minOut, quotedOutWei };
+  }
+
+  /** Sell = reverse the same prepared V2/V3 topology the UI preview / buy path use. */
+  private static async appendPreparedDexSellRouteDescs(input: {
+    chainId: number;
+    preparedDescs: SwapDescLike[];
+    amountIn: bigint;
+    tokenIn: Address;
+    baseTokenAddress: Address;
+    isTurbo: boolean;
+    slippageBps: bigint;
+    descs: SwapDescLike[];
+    timeStep?: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+    debug?: boolean;
+  }): Promise<{ minOut: bigint; estimatedOut: bigint }> {
+    const reversed = this.reverseSwapDescRoute(input.preparedDescs);
+    if (!reversed?.length) throw new Error('官方报价路径尚未就绪，请稍后再试');
+    const cloned = this.cloneSwapDescLikeArray(reversed) ?? [];
+    if (!cloned.length) throw new Error('官方报价路径尚未就绪，请稍后再试');
+    if (cloned[0]?.tokenIn.toLowerCase() !== input.tokenIn.toLowerCase()) {
+      throw new Error('官方报价路径尚未就绪，请稍后再试');
+    }
+
+    let estimatedOut = 0n;
+    let minOut = 0n;
+    if (!input.isTurbo) {
+      let hopAmount = input.amountIn;
+      for (let i = 0; i < cloned.length; i++) {
+        const quoteHop = () => this.quoteSwapDescExactIn(input.chainId, cloned[i], hopAmount);
+        const out = input.timeStep
+          ? await input.timeStep(`quote:prepared:sell:hop${i}`, quoteHop)
+          : await quoteHop();
+        if (out <= 0n) throw new Error('官方报价路径尚未就绪，请稍后再试');
+        hopAmount = out;
+      }
+      estimatedOut = hopAmount;
+      minOut = applySlippage(estimatedOut, input.slippageBps);
+    }
+
+    this.logRoutePool(input.debug, 'sell.prepared.topology', {
+      chainId: input.chainId,
+      tokenIn: input.tokenIn,
+      baseTokenAddress: input.baseTokenAddress,
+      hops: this.summarizeRouteDescs(cloned),
+      source: 'prepareEvmTradeRoute',
+    });
+    for (const desc of cloned) {
+      input.descs.push({
+        ...desc,
+        swapType: input.chainId === ChainId.RH
+          ? toRhDexSwapType(desc.swapType as SwapType)
+          : desc.swapType,
+      });
+    }
+    return { minOut, estimatedOut };
   }
 
   private static preferHintFromDesc(desc: SwapDescLike | null | undefined): 'v2' | 'v3' | null {
@@ -7174,8 +7233,12 @@ export class TradeService {
         data: encodeHyperZapBuyData(minOut),
       }));
     } else {
-      const canConsumePreparedTopology = !isInner
-        && !!preparedRoute?.descs.length
+      // Trust the prepared V2/V3 topology whenever prepareEvmTradeRoute produced one —
+      // even if launchpad classification still says "inner" (e.g. migrated Flap with
+      // tpool.launch_type not yet merged). Using the inner launchpad hop here would
+      // send swapType=FLAP_EXACT_INPUT against FlapshTokenManager and fail with
+      // ERC20 insufficient allowance on the intermediate quote (GIGGLE, etc.).
+      const canConsumePreparedTopology = !!preparedRoute?.descs.length
         && this.isStandardPreparedDexBuyRoute(input.chainId, preparedRoute.descs, tokenOut);
 
       if (canConsumePreparedTopology && preparedRoute) {
@@ -7266,7 +7329,10 @@ export class TradeService {
       }
 
       // Hop 2: [BaseToken/Quote] -> Meme
-      if (isInner && launchpadConfig) {
+      const useInnerLaunchpadHop = isInner && !!launchpadConfig
+        && !hasConfirmedFlapOuterRoute(tokenInfo)
+        && String(tokenInfo.tpool_launch_type || '').trim().toLowerCase() !== 'migrated';
+      if (useInnerLaunchpadHop) {
         const platform = launchpadPlatform;
         let dataForDesc: `0x${string}` = '0x';
         let feeForDesc = 0;
@@ -8049,6 +8115,7 @@ export class TradeService {
       const preparedSplit = this.splitPreparedBuyRoute(preparedRoute, sellToken);
       const descs: SwapDescLike[] = [];
       let estimatedOut = 0n;
+      let minOut = 0n;
       let minFundsForSell = 0n;
       let sellTokenManager: Address | null = null;
       let sellManagerForRoute: Address = (isHyperAltfun || isPonsInner || isGeniusDedicated) ? ZERO_ADDRESS : (launchpadConfig?.manager ?? ZERO_ADDRESS);
@@ -8059,7 +8126,32 @@ export class TradeService {
         amountInForQuote = baseBal > 0n ? (baseBal * BigInt(percentBps)) / 10000n : 1n;
       }
 
-      if (isPonsInner) {
+      const useInnerLaunchpadHop = isInner && !!launchpadConfig
+        && !hasConfirmedFlapOuterRoute(tokenInfo)
+        && String(tokenInfo.tpool_launch_type || '').trim().toLowerCase() !== 'migrated';
+      const canConsumePreparedTopology = !!preparedRoute?.descs.length
+        && this.isStandardPreparedDexBuyRoute(input.chainId, preparedRoute.descs, sellToken);
+      let usedPreparedDexTopology = false;
+      if (canConsumePreparedTopology && preparedRoute) {
+        const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
+        const preparedQuote = await this.appendPreparedDexSellRouteDescs({
+          chainId: input.chainId,
+          preparedDescs: preparedRoute.descs,
+          amountIn: amountInForQuote,
+          tokenIn: sellToken,
+          baseTokenAddress,
+          isTurbo,
+          slippageBps,
+          descs,
+          timeStep,
+          debug: sellDebug,
+        });
+        estimatedOut = preparedQuote.estimatedOut;
+        minOut = preparedQuote.minOut;
+        usedPreparedDexTopology = true;
+      }
+
+      if (!usedPreparedDexTopology && isPonsInner) {
         const ponsState = await timeStep('pons:state', () => getPonsTradeState(sellToken, { force: runtimeOpts?.forceRefreshHyperState === true }));
         if (!ponsState?.tradeable) throw new Error('该代币不是可交易的 pons 代币');
 
@@ -8116,7 +8208,7 @@ export class TradeService {
             if (!isTurbo) estimatedOut = bridgedOut;
           }
         }
-      } else if (isGeniusDedicated && geniusState) {
+      } else if (!usedPreparedDexTopology && isGeniusDedicated && geniusState) {
         const innerTokenOut = geniusState.quoteRouterToken;
         let minQuoteOut = 0n;
         if (!isTurbo) {
@@ -8173,7 +8265,7 @@ export class TradeService {
             if (!isTurbo) estimatedOut = bridgedOut;
           }
         }
-      } else if (isHyperAltfun) {
+      } else if (!usedPreparedDexTopology && isHyperAltfun) {
         const hyperState = await timeStep('hyper:state', () => getHyperTradeState(sellToken, { force: runtimeOpts?.forceRefreshHyperState === true }));
         if (!hyperState.isInner && !hyperState.isOuter) throw new Error('该代币不是有效的 alt.fun Hyper 代币');
 
@@ -8255,7 +8347,7 @@ export class TradeService {
             }));
           }
         }
-      } else if (isInner && launchpadConfig) {
+      } else if (!usedPreparedDexTopology && useInnerLaunchpadHop) {
         const platform = resolveTradeLaunchpadPlatform(tokenInfo);
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         let minFunds = 0n;
@@ -8405,7 +8497,13 @@ export class TradeService {
       // hop1 (e.g. Genius outer: the Genius branch already pushed Genius→quote +
       // bridge, and this block would push another Genius→quote, causing the
       // contract to re-sell Genius the router no longer holds → ERC20InsufficientBalance).
-      if (!isInner && !isHyperAltfun && !isGeniusDedicated && !isPonsInner) {
+      if (
+        !usedPreparedDexTopology
+        && !isInner
+        && !isHyperAltfun
+        && !isGeniusDedicated
+        && !isPonsInner
+      ) {
         const preferExactQuoteForStocks = isTurbo && needsStocksQuoteRoute;
         const turboRouteMode = isTurbo && !preferExactQuoteForStocks;
         // hop1
@@ -8551,8 +8649,7 @@ export class TradeService {
         }
       }
 
-      let minOut = 0n;
-      if (estimatedOut > 0n) {
+      if (!usedPreparedDexTopology && estimatedOut > 0n) {
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         minOut = applySlippage(estimatedOut, slippageBps);
       }

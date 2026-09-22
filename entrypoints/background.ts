@@ -8,6 +8,7 @@ import {
   cancelAllLimitOrders, cancelAllSellLimitOrdersForToken, cancelLimitOrder,
   clearExecutedLimitOrders,
   createLimitOrder,
+  createLimitOrdersBatch,
   listLimitOrders,
   patchLimitOrder,
 } from '@/services/limitOrders/store';
@@ -2020,6 +2021,38 @@ export default defineBackground(() => {
             broadcastStateChange();
             limitOrderScanner?.scheduleFromStorage().catch(() => { });
             return { ok: true, order };
+          }
+
+          case 'limitOrder:createBatch': {
+            const orders = await createLimitOrdersBatch(msg.inputs);
+            const anchor = orders[0] ?? msg.inputs[0];
+            if (anchor) {
+              scheduleLimitOrderPrewarm({
+                chainId: anchor.chainId,
+                tokenAddress: anchor.tokenAddress,
+                tokenInfo: anchor.tokenInfo ?? null,
+                fromAddress: anchor.fromAddress,
+              });
+              if (anchor.chainId !== ChainId.SOL && anchor.tokenInfo) {
+                const routeAnchor = orders.find((o) => o.gmgnQuoteLineage?.length) ?? orders[0];
+                void refreshLimitOrderRouteForToken({
+                  chainId: anchor.chainId,
+                  tokenAddress: anchor.tokenAddress,
+                  tokenInfo: anchor.tokenInfo,
+                  baseTokenAddress: anchor.baseTokenAddress ?? routeAnchor?.baseTokenAddress,
+                  gmgnQuoteLineageHint: routeAnchor?.gmgnQuoteLineage ?? anchor.gmgnQuoteLineage,
+                }).then((refreshed) => {
+                  if (refreshed) broadcastStateChange();
+                }).catch(() => { });
+              }
+              void ensureGmgnFollowForLimitOrder({
+                chainId: anchor.chainId,
+                tokenAddress: anchor.tokenAddress,
+              }).catch(() => { });
+            }
+            broadcastStateChange();
+            limitOrderScanner?.scheduleFromStorage().catch(() => { });
+            return { ok: true, orders };
           }
 
           case 'limitOrder:cancel': {

@@ -85,6 +85,7 @@ export function normalizeFlapLaunchpadStatus(
   tokenInfo?: Partial<Pick<TokenInfo,
     'address'
     | 'launchpad_status'
+    | 'tpool_launch_type'
     | 'pool_pair'
     | 'biggest_pool_address'
     | 'tpool_pool_address'
@@ -98,6 +99,7 @@ export function normalizeFlapLaunchpadStatus(
   void chainId;
   const rawLaunchpadStatus = Number(tokenInfo?.launchpad_status ?? Number.NaN);
   if (Number.isFinite(rawLaunchpadStatus) && rawLaunchpadStatus === 1) return 1;
+  if (String(tokenInfo?.tpool_launch_type || '').trim().toLowerCase() === 'migrated') return 1;
   return hasConfirmedFlapOuterRoute(tokenInfo) ? 1 : 0;
 }
 

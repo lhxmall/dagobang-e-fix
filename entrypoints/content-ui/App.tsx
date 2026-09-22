@@ -4505,18 +4505,43 @@ export default function App() {
     if (!inputs.length) return 0;
     await cancelAllSellLimitOrdersForToken(ctx.chainId, tokenAddress, ctx.walletAddress);
     const autoSellGmgnLineage = getGmgnLineage(ctx.chainId, tokenAddress) ?? undefined;
-    for (const input of inputs) {
-      await call({
-        type: 'limitOrder:create',
-        input: {
-          ...input,
-          fromAddress: ctx.walletAddress,
-          gmgnQuoteLineage: autoSellGmgnLineage,
-        },
-      } as const);
-    }
+    const batchInputs = inputs.map((input) => ({
+      ...input,
+      fromAddress: ctx.walletAddress,
+      gmgnQuoteLineage: autoSellGmgnLineage,
+    }));
+    const res = await call({
+      type: 'limitOrder:createBatch',
+      inputs: batchInputs,
+    } as const);
+    const createdOrders = (res as {
+      orders?: Array<{ id?: string; orderType?: string; triggerPriceUsd?: number; targetChangePercent?: number }>;
+    })?.orders ?? [];
+    const createdOrderIds = new Set<string>();
+    const createdSummaries: Array<{ id: string; orderType: string; triggerPriceUsd: number; targetChangePercent?: number }> = [];
+    createdOrders.forEach((order, index) => {
+      const input = inputs[index];
+      if (!order?.id) return;
+      createdOrderIds.add(order.id);
+      createdSummaries.push({
+        id: order.id,
+        orderType: String(order.orderType || input?.orderType || 'sell'),
+        triggerPriceUsd: Number(order.triggerPriceUsd ?? input?.triggerPriceUsd),
+        targetChangePercent: typeof order.targetChangePercent === 'number'
+          ? order.targetChangePercent
+          : input?.targetChangePercent,
+      });
+    });
+    console.info('[autoSell.orders.created]', {
+      chainId: ctx.chainId,
+      tokenAddress,
+      walletAddress: ctx.walletAddress,
+      planned: inputs.length,
+      persisted: createdOrderIds.size,
+      orders: createdSummaries,
+    });
     await followTokenForLimitOrders(tokenAddress, 'buy_auto_created_limit_orders');
-    return inputs.length;
+    return createdOrderIds.size;
   }, [followTokenForLimitOrders, resolveAutoSellEntryPriceUsd, resolveEffectiveBuyTokenOutWei, tradeBasePriceUsdByKey, upsertTradeBasePriceUsd]);
 
   const renderTradeSuccessToast = (input: {

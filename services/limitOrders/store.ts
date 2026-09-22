@@ -6,6 +6,18 @@ import { buildScopedTokenKey, normalizeWalletAddressKey } from '@/services/xSnip
 
 const executingLimitOrderIds = new Set<string>();
 
+/** Serialize read-modify-write so route refresh patches cannot drop concurrent creates. */
+let limitOrdersWriteLock: Promise<void> = Promise.resolve();
+
+async function withLimitOrdersWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = limitOrdersWriteLock.then(task, task);
+  limitOrdersWriteLock = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 export const makeLimitOrderId = () => {
   try {
     return crypto.randomUUID();
@@ -52,13 +64,15 @@ const normalizePercentValue = (value: number) => {
 };
 
 export const patchLimitOrder = async (id: string, patch: Partial<LimitOrder>) => {
-  const all = await getLimitOrders();
-  const nextPatch = { ...patch } as Partial<LimitOrder>;
-  if (typeof nextPatch.triggerPriceUsd === 'number') nextPatch.triggerPriceUsd = normalizePriceUsd(nextPatch.triggerPriceUsd);
-  if (typeof nextPatch.trailingPeakPriceUsd === 'number') nextPatch.trailingPeakPriceUsd = normalizePriceUsd(nextPatch.trailingPeakPriceUsd);
-  const next = all.map((o) => (o.id === id ? { ...o, ...nextPatch } : o));
-  await setLimitOrders(next);
-  return next;
+  return withLimitOrdersWriteLock(async () => {
+    const all = await getLimitOrders();
+    const nextPatch = { ...patch } as Partial<LimitOrder>;
+    if (typeof nextPatch.triggerPriceUsd === 'number') nextPatch.triggerPriceUsd = normalizePriceUsd(nextPatch.triggerPriceUsd);
+    if (typeof nextPatch.trailingPeakPriceUsd === 'number') nextPatch.trailingPeakPriceUsd = normalizePriceUsd(nextPatch.trailingPeakPriceUsd);
+    const next = all.map((o) => (o.id === id ? { ...o, ...nextPatch } : o));
+    await setLimitOrders(next);
+    return next;
+  });
 };
 
 export const applyTrailingStopUpdate = async (order: LimitOrder, priceUsd: number) => {
@@ -89,7 +103,7 @@ export const listLimitOrders = async (chainId: number, tokenAddress?: ChainAddre
   return filtered;
 };
 
-export const createLimitOrder = async (input: LimitOrderCreateInput) => {
+function buildLimitOrderFromInput(input: LimitOrderCreateInput, all: LimitOrder[]): LimitOrder {
   const triggerPriceUsd = normalizePriceUsd(Number(input.triggerPriceUsd));
   if (!Number.isFinite(triggerPriceUsd) || triggerPriceUsd <= 0) throw new Error('Invalid trigger price');
   if (!input.tokenInfo) throw new Error('Token info required');
@@ -133,7 +147,6 @@ export const createLimitOrder = async (input: LimitOrderCreateInput) => {
     if (!hasTokenAmount && !hasPercent) throw new Error('Invalid sell amount');
   }
 
-  const all = await getLimitOrders();
   const keyAddr = buildScopedTokenKey(input.chainId, input.tokenAddress);
   const inputFromLower = input.fromAddress ? normalizeWalletAddressKey(input.fromAddress) : null;
   const inputBaseTokenLower = input.baseTokenAddress ? buildScopedTokenKey(input.chainId, input.baseTokenAddress) : null;
@@ -202,7 +215,7 @@ export const createLimitOrder = async (input: LimitOrderCreateInput) => {
     return existing;
   }
 
-  const order: LimitOrder = {
+  return {
     id: makeLimitOrderId(),
     chainId: input.chainId,
     tokenAddress: input.tokenAddress,
@@ -241,39 +254,73 @@ export const createLimitOrder = async (input: LimitOrderCreateInput) => {
     tradeRoutePreview: input.tradeRoutePreview,
     tradeRouteLaunchpadStatus: input.tradeRouteLaunchpadStatus,
   };
+}
 
-  await setLimitOrders([order, ...all]);
-  return order;
+/** Atomically create multiple orders — avoids interleaved route patches dropping later rows. */
+export const createLimitOrdersBatch = async (inputs: LimitOrderCreateInput[]): Promise<LimitOrder[]> => {
+  if (!inputs.length) return [];
+  return withLimitOrdersWriteLock(async () => {
+    let all = await getLimitOrders();
+    const created: LimitOrder[] = [];
+    for (const input of inputs) {
+      const beforeIds = new Set(all.map((o) => o.id));
+      const order = buildLimitOrderFromInput(input, all);
+      if (!beforeIds.has(order.id)) {
+        all = [order, ...all];
+      }
+      created.push(order);
+    }
+    await setLimitOrders(all);
+    return created;
+  });
+};
+
+export const createLimitOrder = async (input: LimitOrderCreateInput) => {
+  return withLimitOrdersWriteLock(async () => {
+    const all = await getLimitOrders();
+    const order = buildLimitOrderFromInput(input, all);
+    const exists = all.some((o) => o.id === order.id);
+    if (!exists) {
+      await setLimitOrders([order, ...all]);
+    }
+    return order;
+  });
 };
 
 export const cancelLimitOrder = async (id: string) => {
-  const all = await getLimitOrders();
-  const next = all.filter((o) => !(o.id === id));
-  await setLimitOrders(next);
-  return next;
+  return withLimitOrdersWriteLock(async () => {
+    const all = await getLimitOrders();
+    const next = all.filter((o) => !(o.id === id));
+    await setLimitOrders(next);
+    return next;
+  });
 };
 
 export const cancelAllLimitOrders = async (chainId: number, tokenAddress?: ChainAddress) => {
-  const all = await getLimitOrders();
-  const next = all.filter((o) => {
-    if (o.chainId !== chainId) return true;
-    if (tokenAddress && buildScopedTokenKey(o.chainId, o.tokenAddress) !== buildScopedTokenKey(chainId, tokenAddress)) return true;
-    if (o.status === 'executed') return true;
-    return false;
+  return withLimitOrdersWriteLock(async () => {
+    const all = await getLimitOrders();
+    const next = all.filter((o) => {
+      if (o.chainId !== chainId) return true;
+      if (tokenAddress && buildScopedTokenKey(o.chainId, o.tokenAddress) !== buildScopedTokenKey(chainId, tokenAddress)) return true;
+      if (o.status === 'executed') return true;
+      return false;
+    });
+    await setLimitOrders(next);
+    return next;
   });
-  await setLimitOrders(next);
-  return next;
 };
 
 export const clearExecutedLimitOrders = async (chainId: number, tokenAddress?: ChainAddress) => {
-  const all = await getLimitOrders();
-  const next = all.filter((o) => {
-    if (o.chainId !== chainId) return true;
-    if (tokenAddress && buildScopedTokenKey(o.chainId, o.tokenAddress) !== buildScopedTokenKey(chainId, tokenAddress)) return true;
-    return o.status !== 'executed';
+  return withLimitOrdersWriteLock(async () => {
+    const all = await getLimitOrders();
+    const next = all.filter((o) => {
+      if (o.chainId !== chainId) return true;
+      if (tokenAddress && buildScopedTokenKey(o.chainId, o.tokenAddress) !== buildScopedTokenKey(chainId, tokenAddress)) return true;
+      return o.status !== 'executed';
+    });
+    await setLimitOrders(next);
+    return next;
   });
-  await setLimitOrders(next);
-  return next;
 };
 
 export const tryAcquireLimitOrderExecutionLock = (id: string) => {
@@ -292,17 +339,19 @@ export const cancelAllSellLimitOrdersForToken = async (
   fromAddress?: ChainAddress
 ) => {
   if (!tokenAddress) return getLimitOrders();
-  const keyAddr = buildScopedTokenKey(chainId, tokenAddress);
-  const fromLower = fromAddress ? normalizeWalletAddressKey(fromAddress) : null;
-  const all = await getLimitOrders();
-  const next = all.filter((o) => {
-    if (o.chainId !== chainId) return true;
-    if (buildScopedTokenKey(o.chainId, o.tokenAddress) !== keyAddr) return true;
-    if (fromLower && (o.fromAddress ? normalizeWalletAddressKey(o.fromAddress) : null) !== fromLower) return true;
-    if (o.side !== 'sell') return true;
-    if (o.status === 'executed') return true;
-    return false;
+  return withLimitOrdersWriteLock(async () => {
+    const keyAddr = buildScopedTokenKey(chainId, tokenAddress);
+    const fromLower = fromAddress ? normalizeWalletAddressKey(fromAddress) : null;
+    const all = await getLimitOrders();
+    const next = all.filter((o) => {
+      if (o.chainId !== chainId) return true;
+      if (buildScopedTokenKey(o.chainId, o.tokenAddress) !== keyAddr) return true;
+      if (fromLower && (o.fromAddress ? normalizeWalletAddressKey(o.fromAddress) : null) !== fromLower) return true;
+      if (o.side !== 'sell') return true;
+      if (o.status === 'executed') return true;
+      return false;
+    });
+    await setLimitOrders(next);
+    return next;
   });
-  await setLimitOrders(next);
-  return next;
 };

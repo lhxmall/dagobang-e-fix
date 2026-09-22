@@ -22,6 +22,9 @@ export type LimitOrderRouteTopology = {
 /** One in-flight route build per token — coalesces batch creates and graduation refreshes. */
 const routeBuildInflightByTokenKey = new Map<string, Promise<LimitOrderRouteTopology | null>>();
 
+/** Catch limit orders created while an in-flight route build was patching. */
+const deferredRoutePatchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 function tokenRouteKey(chainId: number, tokenAddress: string): string {
   return buildScopedTokenKey(chainId, tokenAddress);
 }
@@ -35,7 +38,11 @@ export async function listOpenLimitOrdersForToken(chainId: number, tokenAddress:
   });
 }
 
-/** Rebuild stored route when missing, or when inner → outer (one-time graduation). */
+/**
+ * Whether open orders on ONE token need a route rebuild.
+ * Always scoped to (chainId, tokenAddress) — never the content-script page token.
+ * Compares fresh tokenInfo for that address vs the route snapshot stored on its orders.
+ */
 export function shouldRefreshLimitOrderRoute(
   previousTokenInfo: TokenInfo | null | undefined,
   tokenInfo: TokenInfo,
@@ -44,7 +51,9 @@ export function shouldRefreshLimitOrderRoute(
   if (orders.some((o) => !o.tradeRouteDescs?.length)) return true;
   const prevStatus = Number(previousTokenInfo?.launchpad_status ?? Number.NaN);
   const nextStatus = Number(tokenInfo.launchpad_status ?? Number.NaN);
+  // Inner → outer graduation for this token only (e.g. Flap/Fourmeme 0 → 1).
   if (Number.isFinite(prevStatus) && prevStatus !== 1 && nextStatus === 1) return true;
+  // Route was built at capturedStatus; token moved since then on the same address.
   const capturedStatus = orders.find((o) => Number.isFinite(Number(o.tradeRouteLaunchpadStatus)))?.tradeRouteLaunchpadStatus;
   if (
     Number.isFinite(capturedStatus)
@@ -54,6 +63,33 @@ export function shouldRefreshLimitOrderRoute(
     return true;
   }
   return false;
+}
+
+function routePrepareBudgetMs(chainId: number): number {
+  // RH (V4 / Pons / GMGN lineage) routinely exceeds BSC prepare time.
+  return chainId === ChainId.RH ? 25_000 : 15_000;
+}
+
+function scheduleDeferredRoutePatch(input: {
+  chainId: number;
+  tokenAddress: string;
+  tokenInfo: TokenInfo;
+  baseTokenAddress?: string;
+  gmgnQuoteLineageHint?: GmgnQuoteLineageEntry[];
+}) {
+  const key = tokenRouteKey(input.chainId, input.tokenAddress);
+  const existing = deferredRoutePatchTimers.get(key);
+  if (existing) clearTimeout(existing);
+  deferredRoutePatchTimers.set(key, setTimeout(() => {
+    deferredRoutePatchTimers.delete(key);
+    void (async () => {
+      const orders = await listOpenLimitOrdersForToken(input.chainId, input.tokenAddress);
+      if (!orders.length) return;
+      const previous = orders.find((o) => o.tokenInfo)?.tokenInfo ?? null;
+      if (!shouldRefreshLimitOrderRoute(previous, input.tokenInfo, orders)) return;
+      await coalesceBuildAndPatchRouteForToken(input);
+    })().catch(() => { });
+  }, 2000));
 }
 
 async function buildLimitOrderRouteTopology(input: {
@@ -70,6 +106,7 @@ async function buildLimitOrderRouteTopology(input: {
     tokenInfo: input.tokenInfo,
     baseTokenAddress: input.baseTokenAddress as `0x${string}` | undefined,
     gmgnQuoteLineageHint: input.gmgnQuoteLineageHint,
+    prepareBudgetMs: routePrepareBudgetMs(input.chainId),
     fetchGmgnLineage: () => fetchGmgnQuoteLineageViaPage({
       chainId: input.chainId,
       tokenAddress: input.tokenAddress,
@@ -104,8 +141,10 @@ async function coalesceBuildAndPatchRouteForToken(input: {
   const task = (async () => {
     const built = await buildLimitOrderRouteTopology(input);
     if (built) {
+      // Re-list at patch time — batch auto-sell may land the 2nd order during build.
       const orders = await listOpenLimitOrdersForToken(input.chainId, input.tokenAddress);
       if (orders.length) await patchOrdersRouteTopology(orders, built);
+      scheduleDeferredRoutePatch(input);
     }
     return built;
   })().finally(() => {
@@ -113,6 +152,31 @@ async function coalesceBuildAndPatchRouteForToken(input: {
   });
   routeBuildInflightByTokenKey.set(key, task);
   return task;
+}
+
+/** Ensure every open order on the token has a current route (create batch + inner→outer). */
+export async function ensureLimitOrderRoutesReady(input: {
+  chainId: number;
+  tokenAddress: string;
+  tokenInfo: TokenInfo;
+  previousTokenInfo?: TokenInfo | null;
+  baseTokenAddress?: string;
+  gmgnQuoteLineageHint?: GmgnQuoteLineageEntry[];
+}): Promise<LimitOrderRouteTopology | null> {
+  if (input.chainId === ChainId.SOL) return null;
+  const openOrders = await listOpenLimitOrdersForToken(input.chainId, input.tokenAddress);
+  if (!openOrders.length) return null;
+  const previous = input.previousTokenInfo ?? openOrders.find((o) => o.tokenInfo)?.tokenInfo ?? null;
+  if (!shouldRefreshLimitOrderRoute(previous, input.tokenInfo, openOrders)) {
+    const sample = openOrders.find((o) => o.tradeRouteDescs?.length);
+    if (!sample?.tradeRouteDescs?.length || !sample.tradeRoutePreview?.hops?.length) return null;
+    return {
+      descs: sample.tradeRouteDescs,
+      preview: sample.tradeRoutePreview,
+      launchpadStatus: sample.tradeRouteLaunchpadStatus,
+    };
+  }
+  return coalesceBuildAndPatchRouteForToken(input);
 }
 
 export async function patchOrdersRouteTopology(
@@ -146,7 +210,8 @@ export async function refreshLimitOrderRouteForToken(input: {
   if (input.chainId === ChainId.SOL) return false;
   const openOrders = await listOpenLimitOrdersForToken(input.chainId, input.tokenAddress);
   if (!openOrders.length) return false;
-  if (!shouldRefreshLimitOrderRoute(input.previousTokenInfo, input.tokenInfo, openOrders)) {
+  const previous = input.previousTokenInfo ?? openOrders.find((o) => o.tokenInfo)?.tokenInfo ?? null;
+  if (!shouldRefreshLimitOrderRoute(previous, input.tokenInfo, openOrders)) {
     return false;
   }
 
