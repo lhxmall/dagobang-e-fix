@@ -319,21 +319,6 @@ export default defineContentScript({
         window.postMessage({ type: 'DAGOBANG_AXIOM_PAIR', pair, ts: Date.now() }, '*');
       };
 
-      const tickerFromTitle = (): string => {
-        const head = String(document.title || '').split('|')[0]?.trim() || '';
-        const name = head.replace(/\s+[↑↓].*$/u, '').trim();
-        if (!name || name.length > 24 || /^0x/i.test(name) || /axiom/i.test(name)) return '';
-        return name;
-      };
-
-      const postFromTitle = () => {
-        const tokenAddress = currentUrlToken();
-        const tokenTicker = tickerFromTitle();
-        if (!tokenAddress || !tokenTicker) return;
-        if (!window.location.pathname.includes('/meme/') && !window.location.pathname.includes('/token/')) return;
-        postPair({ tokenAddress, tokenTicker, tokenName: tokenTicker });
-      };
-
       const origFetch = window.fetch.bind(window);
       window.fetch = async (...args: Parameters<typeof fetch>) => {
         const res = await origFetch(...args);
@@ -351,12 +336,6 @@ export default defineContentScript({
         return res;
       };
 
-      postFromTitle();
-      const titleEl = document.querySelector('title');
-      if (titleEl) {
-        new MutationObserver(postFromTitle).observe(titleEl, { childList: true, characterData: true, subtree: true });
-      }
-      window.setInterval(postFromTitle, 2000);
       const scanOnce = (): boolean => {
         try {
           const root = document.documentElement;
@@ -384,31 +363,38 @@ export default defineContentScript({
             const pairAddress = pickStr(rec, ['pairAddress', 'poolAddress', 'pair']);
             return { ...rec, tokenAddress, tokenTicker, tokenName, pairAddress };
           };
-          const walk = (f: unknown): AxiomPairInfo | null => {
-            if (!f || seen.has(f) || seen.size > 12000) return null;
+          const walk = (f: unknown, out: AxiomPairInfo[]): void => {
+            if (!f || seen.has(f) || seen.size > 12000) return;
             seen.add(f);
             try {
               const node = f as { memoizedProps?: unknown; memoizedState?: unknown; child?: unknown; sibling?: unknown };
-              const fromProps = normalizePair(node.memoizedProps)
-                || (node.memoizedProps && typeof node.memoizedProps === 'object' && 'pair' in node.memoizedProps
-                  ? normalizePair((node.memoizedProps as { pair: unknown }).pair)
-                  : null);
-              if (fromProps) return fromProps;
-              const fromState = normalizePair(node.memoizedState);
-              if (fromState) return fromState;
+              const props = node.memoizedProps;
+              const fromProps = normalizePair(props)
+                || (props && typeof props === 'object' && 'pair' in props ? normalizePair(props.pair) : null);
+              if (fromProps) {
+                out.push(fromProps);
+              } else {
+                const fromState = normalizePair(node.memoizedState);
+                if (fromState) out.push(fromState);
+              }
             } catch { }
             const node = f as { child?: unknown; sibling?: unknown };
-            return walk(node.child) ?? walk(node.sibling);
+            walk(node.child, out);
+            walk(node.sibling, out);
           };
-          const pair = walk((root as unknown as Record<string, unknown>)[fiberKey]);
-          // React tree also carries other tokens (watchlists). Accept the pair whose
-          // pool or mint matches the current /meme/<id> URL (Sol uses pool, EVM often mint).
-          const urlSegment = window.location.pathname.split('/').filter(Boolean).pop() || '';
-          if (!pair || !urlSegment) return false;
-          const seg = urlSegment.toLowerCase();
-          const pairAddr = String(pair.pairAddress || '').toLowerCase();
-          const mint = String(pair.tokenAddress || '').toLowerCase();
-          if (pairAddr !== seg && mint !== seg) return false;
+          // React tree also carries other tokens (watchlists), so pick the candidate whose
+          // pool or mint matches the current /meme/<id> URL (Sol uses pool, EVM often mint)
+          // instead of trusting traversal order.
+          const urlSegment = (window.location.pathname.split('/').filter(Boolean).pop() || '').toLowerCase();
+          const candidates: AxiomPairInfo[] = [];
+          walk((root as unknown as Record<string, unknown>)[fiberKey], candidates);
+          if (!urlSegment) return false;
+          const pair = candidates.find((candidate) => {
+            const pairAddr = String(candidate.pairAddress || '').toLowerCase();
+            const mint = String(candidate.tokenAddress || '').toLowerCase();
+            return pairAddr === urlSegment || mint === urlSegment;
+          });
+          if (!pair) return false;
           const key = String(pair.pairAddress || '') + ':' + pair.tokenAddress;
           const g = window as unknown as { __DAGOBANG_LAST_AXIOM_PAIR__?: string };
           if (g.__DAGOBANG_LAST_AXIOM_PAIR__ !== key) {
