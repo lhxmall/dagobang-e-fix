@@ -1537,49 +1537,37 @@ export function initGmgnWsMonitor(options: {
     const top10HoldRatio = pickFiniteNumber(
       typeof tokenData?.top10HoldRatio === 'number'
         ? tokenData.top10HoldRatio
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['t10'])
-          : undefined,
+        : extractNumber(tokenData, ['t10']),
       prev?.top10HoldRatio,
     );
     const vol24hUsd = pickFiniteNumber(
       typeof tokenData?.vol24hUsd === 'number'
         ? tokenData.vol24hUsd
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['v24h'])
-          : undefined,
+        : extractNumber(tokenData, ['v24h']),
       prev?.vol24hUsd,
     );
     const netBuy24hUsd = pickFiniteNumber(
       typeof tokenData?.netBuy24hUsd === 'number'
         ? tokenData.netBuy24hUsd
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['nba_24h'])
-          : undefined,
+        : extractNumber(tokenData, ['nba_24h']),
       prev?.netBuy24hUsd,
     );
     const buyTx24h = pickFiniteNumber(
       typeof tokenData?.buyTx24h === 'number'
         ? tokenData.buyTx24h
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['b24h'])
-          : undefined,
+        : extractNumber(tokenData, ['b24h']),
       prev?.buyTx24h,
     );
     const sellTx24h = pickFiniteNumber(
       typeof tokenData?.sellTx24h === 'number'
         ? tokenData.sellTx24h
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['s24h'])
-          : undefined,
+        : extractNumber(tokenData, ['s24h']),
       prev?.sellTx24h,
     );
     const smartMoney = pickFiniteNumber(
       typeof tokenData?.smartMoney === 'number'
         ? tokenData.smartMoney
-        : preferDevMetrics
-          ? extractNumber(tokenData, ['smt'])
-          : undefined,
+        : extractNumber(tokenData, ['smt']),
       prev?.smartMoney,
     );
     const devHasSold =
@@ -1622,7 +1610,10 @@ export function initGmgnWsMonitor(options: {
             ? tokenData.lqdt
             : prev?.liquidityUsd,
       holders: (() => {
-        const next = typeof tokenData?.holders === 'number' ? tokenData.holders : prev?.holders;
+        const next = pickFiniteNumber(
+          typeof tokenData?.holders === 'number' ? tokenData.holders : extractNumber(tokenData, ['hd']),
+          prev?.holders,
+        );
         if (preferDevMetrics) return next;
         const prevH = typeof prev?.holders === 'number' ? prev.holders : null;
         return next === 0 && prevH != null && prevH > 0 ? prevH : next;

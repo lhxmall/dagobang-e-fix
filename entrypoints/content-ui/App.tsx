@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import toast from 'react-hot-toast';
 import { SatelliteDish } from 'lucide-react';
 import { formatUnits, parseUnits, zeroAddress } from 'viem';
-import type { Account, BgGetStateResponse, QuickBuyPresetOverride, QuickTradeRoutePreview, Settings, SubmitChannel, TradeSuccessSoundPreset, TradeTurboPrewarmInput } from '@/types/extention';
+import type { Account, BgGetStateResponse, GmgnQuoteLineageEntry, QuickBuyPresetOverride, QuickTradeRoutePreview, Settings, SubmitChannel, TradeSuccessSoundPreset, TradeTurboPrewarmInput } from '@/types/extention';
 import type { TokenInfo, TokenStat } from '@/types/token';
 import { normalizeLocale, t, type Locale } from '@/utils/i18n';
 import { formatBroadcastProvider, formatPriceValue } from '@/utils/format';
@@ -14,6 +14,9 @@ import { TokenService } from '@/services/token';
 import { getChainIdByName, getNativeSymbol, normalizeChainName, toGmgnChainName } from '@/constants/chains';
 import { ChainId } from '@/constants/chains/chainId';
 import { getChainRuntimeBase, isSolanaChain } from '@/constants/chains/runtime';
+import { isTradeRouteTerminalQuote } from '@/utils/tradeRouteTerminals';
+import { shouldWalkGmgnQuoteLineage, walkGmgnQuoteLineage } from '@/utils/gmgnQuoteLineage';
+import { setGmgnLineage, getGmgnLineage } from '@/utils/gmgnLineageStore';
 import { getEvmChainRuntime } from '@/constants/chains/evmRuntime';
 import { USDC, USDT } from '@/constants/tokens/chains/common';
 import { bscTokens } from '@/constants/tokens/chains/bsc';
@@ -142,6 +145,7 @@ function getTokenInfoWarmFingerprint(tokenInfo: TokenInfo | null | undefined): s
     String(tokenInfo.launchpad_platform || '').toLowerCase(),
     String(tokenInfo.launchpad_status ?? ''),
     String(tokenInfo.quote_token_address || '').toLowerCase(),
+    String(tokenInfo.pool_factory || '').toLowerCase(),
     String(tokenInfo.dex_type || '').toLowerCase(),
     String(tokenInfo.pool_pair || tokenInfo.biggest_pool_address || '').toLowerCase(),
   ].join('|');
@@ -354,8 +358,18 @@ function resolveTradeBaseTokenAddress(settings: Settings | null | undefined, cha
   const chainId = chainIdOverride ?? settings?.chainId ?? 56;
   if (isSolanaChain(chainId)) return zeroAddress;
   const runtime = getEvmChainRuntime(chainId);
-  const baseToken = String(settings?.chains?.[chainId]?.tradeBaseToken ?? settings?.tradeBaseToken ?? 'BNB').toUpperCase();
-  if (baseToken === 'WBNB') return runtime.wrappedNativeAddress;
+  const nativeSymbol = getNativeSymbol(chainId).toUpperCase();
+  const baseToken = String(
+    settings?.chains?.[chainId]?.tradeBaseToken
+    ?? settings?.tradeBaseToken
+    ?? nativeSymbol,
+  ).toUpperCase();
+  if (baseToken === 'WBNB' || baseToken === 'WETH' || baseToken === `W${nativeSymbol}`) {
+    return runtime.wrappedNativeAddress;
+  }
+  if (baseToken === nativeSymbol || baseToken === 'BNB' || baseToken === 'ETH' || baseToken === 'SOL') {
+    return zeroAddress;
+  }
   if (baseToken === 'USDC') return (USDC[chainId as keyof typeof USDC]?.address ?? zeroAddress) as `0x${string}`;
   if (baseToken === 'USDT') return (USDT[chainId as keyof typeof USDT]?.address ?? zeroAddress) as `0x${string}`;
   if (baseToken === 'USD1' && chainId === 56) return bscTokens.usd1.address as `0x${string}`;
@@ -401,6 +415,53 @@ function resolveTradeBaseTokenMeta(chainId: number, tradeBaseTokenAddress: Chain
   }
 
   return { symbol: 'TOKEN', decimals: runtime.kind === 'evm' ? getEvmChainRuntime(chainId).viemChain.nativeCurrency.decimals : 9 };
+}
+
+const MULTI_CHAIN_TRADE_BASE_PRICE_REFRESH_MS = 30_000;
+const MULTI_CHAIN_TRADE_BASE_PRICE_CHAIN_IDS = [
+  ChainId.BNB,
+  ChainId.RH,
+  ChainId.ETH,
+  ChainId.HYPER,
+  ChainId.SOL,
+] as const;
+
+function getTradeBasePriceCacheKey(chainId: number, tradeBaseTokenAddress: ChainAddress): string {
+  return `${chainId}:${String(tradeBaseTokenAddress || zeroAddress).toLowerCase()}`;
+}
+
+async function fetchTradeBaseTokenPriceUsd(
+  platform: string,
+  chainId: number,
+  tradeBaseTokenAddress: ChainAddress,
+  tradeBaseTokenMeta: { symbol: string; decimals?: number },
+): Promise<number | null> {
+  const stableSymbol = tradeBaseTokenMeta.symbol.toUpperCase();
+  if (stableSymbol === 'USDC' || stableSymbol === 'USDT' || stableSymbol === 'USD1' || stableSymbol === 'USDG') {
+    return 1;
+  }
+
+  const runtime = getChainRuntimeBase(chainId);
+  const priceTokenAddress = tradeBaseTokenAddress.toLowerCase() === zeroAddress.toLowerCase()
+    ? (runtime.kind === 'evm' ? getEvmChainRuntime(chainId).wrappedNativeAddress : SOLANA_WRAPPED_NATIVE_MINT)
+    : tradeBaseTokenAddress;
+  const wrappedNativeAddress = runtime.kind === 'evm'
+    ? getEvmChainRuntime(chainId).wrappedNativeAddress.toLowerCase()
+    : SOLANA_WRAPPED_NATIVE_MINT.toLowerCase();
+  const priceTokenMeta = priceTokenAddress.toLowerCase() === wrappedNativeAddress
+    ? {
+        address: priceTokenAddress,
+        symbol: runtime.kind === 'evm' ? `W${runtime.nativeSymbol}` : 'WSOL',
+        decimals: runtime.kind === 'evm' ? getEvmChainRuntime(chainId).viemChain.nativeCurrency.decimals : 9,
+      } as TokenInfo
+    : null;
+
+  try {
+    const price = await TokenAPI.getTokenPriceUsd(platform, chainId, priceTokenAddress, priceTokenMeta);
+    return price && Number.isFinite(price) && price > 0 ? price : null;
+  } catch {
+    return null;
+  }
 }
 
 function deriveUsdFromBaseAmount(
@@ -487,6 +548,7 @@ type PendingAutoSellOrderContext = {
   tokenAddress: string;
   walletAddress: ChainAddress;
   buyNativeAmountWei: string;
+  buyBaseTokenAddress: ChainAddress;
   actualTokenOutWei?: string | null;
   quotedOutWei?: string | null;
   siteInfo: SiteInfo;
@@ -578,7 +640,14 @@ export default function App() {
   const [draftQuickBuyPresetOverrides, setDraftQuickBuyPresetOverrides] = useState<QuickBuyPresetOverride[]>(DEFAULT_QUICK_BUY_PRESET_OVERRIDES);
   const [tokenStat, setTokenStat] = useState<TokenStat | null>(null);
   const [tokenPriceUsd, setTokenPriceUsd] = useState<number | null>(null);
-  const [tradeBasePriceUsd, setTradeBasePriceUsd] = useState<number | null>(null);
+  const [tradeBasePriceUsdByKey, setTradeBasePriceUsdByKey] = useState<Record<string, number>>({});
+  const upsertTradeBasePriceUsd = useCallback((cacheKey: string, price: number) => {
+    if (!(Number.isFinite(price) && price > 0)) return;
+    setTradeBasePriceUsdByKey((prev) => {
+      if (prev[cacheKey] === price) return prev;
+      return { ...prev, [cacheKey]: price };
+    });
+  }, []);
   const [buyPreviewQuotedUsd, setBuyPreviewQuotedUsd] = useState<Array<number | null>>([null, null, null, null]);
   const [buyPreviewQuotedTokenAmounts, setBuyPreviewQuotedTokenAmounts] = useState<Array<number | null>>([null, null, null, null]);
   const [sellPreviewQuotedUsd, setSellPreviewQuotedUsd] = useState<Array<number | null>>([null, null, null, null]);
@@ -588,6 +657,7 @@ export default function App() {
     tokenAddress: string;
     preview: QuickTradeRoutePreview;
   } | null>(null);
+  const [evmRoutePreparedDescs, setEvmRoutePreparedDescs] = useState<import('@/types/extention').LimitOrderSwapDesc[] | null>(null);
   const [marketCapDisplay, setMarketCapDisplay] = useState<string | null>(null);
   const [liquidityDisplay, setLiquidityDisplay] = useState<string | null>(null);
   const [gmgnHoldingStats, setGmgnHoldingStats] = useState<GmgnHoldingStats | null>(null);
@@ -629,11 +699,16 @@ export default function App() {
   const evmRouteRequestSeqRef = useRef(0);
   const evmRouteFingerprintRef = useRef('');
   const evmRouteIdentityRef = useRef('');
+  const evmRoutePreparedDescsRef = useRef<import('@/types/extention').LimitOrderSwapDesc[] | null>(null);
+  const gmgnLineageRef = useRef<import('@/types/extention').GmgnQuoteLineageEntry[] | null>(null);
   const solSubmitKickoffQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
   const fastPollingRef = useRef<any>(null);
   const approveStatusRefreshSeqRef = useRef(0);
   const tokenRefreshSeqRef = useRef(0);
   const gmgnHoldingRefreshSeqRef = useRef(0);
+  const gmgnHoldingStatsRef = useRef<GmgnHoldingStats | null>(null);
+  const gmgnHoldingZeroStreakRef = useRef(0);
+  const gmgnHoldingHadBalanceRef = useRef(false);
   const solBaseBalanceRefreshSeqRef = useRef(0);
   const solTokenBalanceRefreshSeqRef = useRef(0);
   const gmgnHoldingPollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -862,6 +937,14 @@ export default function App() {
     return resolveTradeBaseTokenMeta(chainId, tradeBaseTokenAddress);
   }, [tradeBaseTokenAddress, chainId]);
   const tradeBaseTokenSymbol = tradeBaseTokenMeta.symbol;
+  const tradeBasePriceCacheKey = useMemo(
+    () => getTradeBasePriceCacheKey(chainId, tradeBaseTokenAddress),
+    [chainId, tradeBaseTokenAddress],
+  );
+  const tradeBasePriceUsd = useMemo(
+    () => tradeBasePriceUsdByKey[tradeBasePriceCacheKey] ?? null,
+    [tradeBasePriceUsdByKey, tradeBasePriceCacheKey],
+  );
   useEffect(() => {
     if (!siteInfo?.tokenAddress) return;
     stickyTokenSiteInfoRef.current = { siteInfo, updatedAt: Date.now() };
@@ -1576,34 +1659,45 @@ export default function App() {
     if (existing) return existing;
     if (input.debugStartLocation && input.debugMsgPrefix) {
     }
-    const prewarmInput: TradeTurboPrewarmInput = {
-      chainId,
-      tokenAddress: tokenAddressNormalized,
-      tokenInfo: tokenInfo ?? undefined,
-      fromAddress: input.fromAddress,
-      submitChannel,
-      platform: normalizedSitePlatform || undefined,
-      baseTokenAddress: tradeBaseTokenAddress,
-    };
-    const inflight = call({
-      type: 'trade:prewarmTurbo',
-      input: prewarmInput,
-    } as const)
-      .then((res) => {
-        if (
-          input.applyRoute !== false
-          && res.route
-          && (typeof input.routeSeq !== 'number' || input.routeSeq === evmRouteRequestSeqRef.current)
-        ) {
-          setEvmRoutePreview({
-            chainId: prewarmInput.chainId,
-            tokenAddress: String(prewarmInput.tokenAddress || '').toLowerCase(),
-            preview: res.route,
-          });
-        }
-        prewarmTurboErrorRef.current.delete(input.key);
-        prewarmedTurboRef.current.set(input.key, Date.now());
-      })
+    // Unified BSC/RH rule: walk GMGN quote→terminal lineage when direct quote is
+    // non-terminal (outer tokens, or inner launchpads like Flap+GMEB).
+    const inflight = (async () => {
+      const gmgnQuoteLineage = (tokenInfo && shouldWalkGmgnQuoteLineage(chainId, tokenInfo))
+        ? await resolveGmgnQuoteLineageViaPage(chainId, tokenAddressNormalized, tokenInfo).catch(() => null)
+        : null;
+      setGmgnLineage(chainId, tokenAddressNormalized, gmgnQuoteLineage);
+      gmgnLineageRef.current = gmgnQuoteLineage;
+      const prewarmInput: TradeTurboPrewarmInput = {
+        chainId,
+        tokenAddress: tokenAddressNormalized,
+        tokenInfo: tokenInfo ?? undefined,
+        fromAddress: input.fromAddress,
+        submitChannel,
+        platform: normalizedSitePlatform || undefined,
+        baseTokenAddress: tradeBaseTokenAddress,
+        gmgnQuoteLineage: gmgnQuoteLineage ?? undefined,
+      };
+      const res = await call({
+        type: 'trade:prewarmTurbo',
+        input: prewarmInput,
+      } as const);
+      if (
+        input.applyRoute !== false
+        && res.route
+        && (typeof input.routeSeq !== 'number' || input.routeSeq === evmRouteRequestSeqRef.current)
+      ) {
+        setEvmRoutePreview({
+          chainId: prewarmInput.chainId,
+          tokenAddress: String(prewarmInput.tokenAddress || '').toLowerCase(),
+          preview: res.route,
+        });
+        const nextRouteDescs = res.routeDescs?.length ? res.routeDescs : null;
+        setEvmRoutePreparedDescs(nextRouteDescs);
+        evmRoutePreparedDescsRef.current = nextRouteDescs;
+      }
+      prewarmTurboErrorRef.current.delete(input.key);
+      prewarmedTurboRef.current.set(input.key, Date.now());
+    })()
       .catch((error) => {
         prewarmedTurboRef.current.delete(input.key);
         const message = error instanceof Error ? error.message : String(error || '交易预热失败');
@@ -1624,6 +1718,8 @@ export default function App() {
     if (!tokenAddressNormalized) {
       setTurboPrewarmState('idle');
       setEvmRoutePreview(null);
+      setEvmRoutePreparedDescs(null);
+      evmRoutePreparedDescsRef.current = null;
       return;
     }
     if (isSolana) {
@@ -1678,10 +1774,15 @@ export default function App() {
       // Only wipe the badge when the traded token / pay token changes.
       evmRouteIdentityRef.current = routeIdentity;
       setEvmRoutePreview(null);
+      setEvmRoutePreparedDescs(null);
+      evmRoutePreparedDescsRef.current = null;
     }
     if (fingerprintChanged) {
       evmRouteFingerprintRef.current = routeFingerprint;
       evmRouteRequestSeqRef.current += 1;
+      setEvmRoutePreview(null);
+      setEvmRoutePreparedDescs(null);
+      evmRoutePreparedDescsRef.current = null;
       setTurboPrewarmState('warming');
     }
     const routeSeq = evmRouteRequestSeqRef.current;
@@ -2417,28 +2518,11 @@ export default function App() {
     let canceled = false;
     if (!settings || !siteInfo) return;
 
-    const runtime = getChainRuntimeBase(chainId);
-    const priceTokenAddress = tradeBaseTokenAddress.toLowerCase() === zeroAddress.toLowerCase()
-      ? (runtime.kind === 'evm' ? getEvmChainRuntime(chainId).wrappedNativeAddress : SOLANA_WRAPPED_NATIVE_MINT)
-      : tradeBaseTokenAddress;
-    const priceTokenMeta = priceTokenAddress.toLowerCase() === (runtime.kind === 'evm' ? getEvmChainRuntime(chainId).wrappedNativeAddress.toLowerCase() : SOLANA_WRAPPED_NATIVE_MINT.toLowerCase())
-      ? {
-          address: priceTokenAddress,
-          symbol: runtime.kind === 'evm' ? `W${runtime.nativeSymbol}` : 'WSOL',
-          decimals: runtime.kind === 'evm' ? getEvmChainRuntime(chainId).viemChain.nativeCurrency.decimals : 9,
-        } as TokenInfo
-      : null;
-    const stableSymbol = tradeBaseTokenMeta.symbol.toUpperCase();
-    if (stableSymbol === 'USDC' || stableSymbol === 'USDT' || stableSymbol === 'USD1' || stableSymbol === 'USDG') {
-      setTradeBasePriceUsd(1);
-      return;
-    }
-
-    void TokenAPI.getTokenPriceUsd(siteInfo.platform, chainId, priceTokenAddress, priceTokenMeta)
+    void fetchTradeBaseTokenPriceUsd(siteInfo.platform, chainId, tradeBaseTokenAddress, tradeBaseTokenMeta)
       .then((price) => {
         if (canceled) return;
         if (price && Number.isFinite(price) && price > 0) {
-          setTradeBasePriceUsd(price);
+          upsertTradeBasePriceUsd(tradeBasePriceCacheKey, price);
         }
       })
       .catch(() => {
@@ -2448,7 +2532,37 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, [settings, siteInfo, tradeBaseTokenAddress, tradeBaseTokenMeta.symbol, chainId]);
+  }, [settings, siteInfo, tradeBaseTokenAddress, tradeBaseTokenMeta.symbol, chainId, tradeBasePriceCacheKey, upsertTradeBasePriceUsd]);
+
+  useEffect(() => {
+    if (!settings || !siteInfo?.platform) return;
+    let canceled = false;
+
+    const refreshMultiChainTradeBasePrices = () => {
+      for (const refreshChainId of MULTI_CHAIN_TRADE_BASE_PRICE_CHAIN_IDS) {
+        const baseTokenAddress = resolveTradeBaseTokenAddress(settings, refreshChainId);
+        const baseTokenMeta = resolveTradeBaseTokenMeta(refreshChainId, baseTokenAddress);
+        const cacheKey = getTradeBasePriceCacheKey(refreshChainId, baseTokenAddress);
+        void fetchTradeBaseTokenPriceUsd(siteInfo.platform, refreshChainId, baseTokenAddress, baseTokenMeta)
+          .then((price) => {
+            if (canceled) return;
+            if (price && Number.isFinite(price) && price > 0) {
+              upsertTradeBasePriceUsd(cacheKey, price);
+            }
+          })
+          .catch(() => {
+            if (canceled) return;
+          });
+      }
+    };
+
+    refreshMultiChainTradeBasePrices();
+    const timer = window.setInterval(refreshMultiChainTradeBasePrices, MULTI_CHAIN_TRADE_BASE_PRICE_REFRESH_MS);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [settings, siteInfo?.platform, upsertTradeBasePriceUsd]);
 
   const quickTradePreviewRoutes = useMemo(() => {
     if (siteInfo?.platform === 'altfun' && chainId === 999) {
@@ -2705,6 +2819,29 @@ export default function App() {
         url: request.url,
         init: request.init,
       }, '*');
+    });
+  }
+
+  /**
+   * Resolve a token's GMGN quote lineage in the content-script main world
+   * (where GMGN auth cookies are available via requestGmgnPageFetch). Walks
+   * token→quote→…→terminal using the /mutil_window_token_info batch POST,
+   * returning authoritative {quote, poolAddress} for each hop. The result is
+   * passed to prewarmTurbo so the background never fetches GMGN directly
+   * (which would CORS/cookie-timeout in the service worker).
+   */
+  async function resolveGmgnQuoteLineageViaPage(
+    targetChainId: number,
+    tokenAddress: string,
+    seedTokenInfo?: TokenInfo | null,
+  ): Promise<GmgnQuoteLineageEntry[] | null> {
+    const chain = siteInfo?.chain ? toGmgnChainName(siteInfo.chain) : 'bsc';
+    return walkGmgnQuoteLineage({
+      chainId: targetChainId,
+      chain,
+      tokenAddress,
+      tokenInfo: seedTokenInfo ?? tokenInfo ?? undefined,
+      pageFetch: requestGmgnPageFetch,
     });
   }
 
@@ -3030,7 +3167,7 @@ export default function App() {
             nextHoldingRaw = result.value ?? '0';
             resolvedHoldingCount += 1;
           }
-          if (isSolana) {
+          {
             let prevActual = 0n;
             let nextActual = 0n;
             const prevActualRaw = prevActualByWallet[addrLower] || '0';
@@ -3041,14 +3178,24 @@ export default function App() {
               prevActual = 0n;
               nextActual = 0n;
             }
-            const pendingDelta = getPendingSolTokenDeltaWei(tokenAddressNormalized, addr);
-            const expectedRemaining = prevActual + pendingDelta;
-            const isTransientZeroAfterPartialSell =
+            if (isSolana) {
+              const pendingDelta = getPendingSolTokenDeltaWei(tokenAddressNormalized, addr);
+              const expectedRemaining = prevActual + pendingDelta;
+              const isTransientZeroAfterPartialSell =
+                nextActual === 0n
+                && prevActual > 0n
+                && pendingDelta < 0n
+                && expectedRemaining > 0n;
+              if (isTransientZeroAfterPartialSell) {
+                nextHoldingRaw = prevActual.toString();
+              }
+            } else if (
               nextActual === 0n
               && prevActual > 0n
-              && pendingDelta < 0n
-              && expectedRemaining > 0n;
-            if (isTransientZeroAfterPartialSell) {
+              && result?.status === 'fulfilled'
+              && !!fastPollingRef.current
+            ) {
+              // GMGN/onchain can briefly return 0 right after a partial sell on EVM.
               nextHoldingRaw = prevActual.toString();
             }
           }
@@ -3170,6 +3317,18 @@ export default function App() {
         : await GmgnAPI.getWalletsHolding(gmgnHoldingChain, tokenAddressNormalized, gmgnHoldingWallets) as GmgnTokenHolding[];
       if (seq !== gmgnHoldingRefreshSeqRef.current) return;
       const nextStats = aggregateGmgnHoldings(holdings);
+      const nextBalanceUsd = nextStats?.balanceUsd ?? 0;
+      const prevBalanceUsd = gmgnHoldingStatsRef.current?.balanceUsd ?? 0;
+      if (nextBalanceUsd <= 0 && prevBalanceUsd > 0) {
+        gmgnHoldingZeroStreakRef.current += 1;
+        // GMGN often returns balance 0 for a few seconds after a partial sell.
+        // Keep the last position and keep polling until the remaining balance comes back.
+        setGmgnHoldingPollingEnabled(true);
+        if (gmgnHoldingZeroStreakRef.current < 5) return;
+      } else {
+        gmgnHoldingZeroStreakRef.current = 0;
+      }
+      if (nextBalanceUsd > 0) gmgnHoldingHadBalanceRef.current = true;
       const derivedPrices = holdings
         .map((item) => resolveHoldingUnitPriceUsd(item))
         .filter((item): item is number => item != null && Number.isFinite(item) && item > 0)
@@ -3192,18 +3351,25 @@ export default function App() {
           return sum;
         }
       }, 0n).toString();
+      gmgnHoldingStatsRef.current = nextStats;
       setGmgnHoldingStats(nextStats);
       setGmgnHoldingTokenPriceUsd(derivedPrice);
       setGmgnHoldingTokenBalanceWei(derivedBalanceWei);
       setGmgnHoldingTokenDecimals(derivedDecimals);
       setGmgnHoldingTokenSymbol(derivedSymbol);
-      setGmgnHoldingPollingEnabled(holdings.some((item) => (parseGmgnNullableNumber(item.balance) ?? 0) > 0));
+      const hasLiveBalance = holdings.some((item) => (parseGmgnNullableNumber(item.balance) ?? 0) > 0);
+      setGmgnHoldingPollingEnabled(hasLiveBalance || gmgnHoldingHadBalanceRef.current);
     } catch (e: any) {
       if (seq !== gmgnHoldingRefreshSeqRef.current) return;
       console.warn('[quickTrade.gmgnHolding.refresh.failed]', {
         source,
         error: String(e?.message || e || ''),
       });
+      if ((gmgnHoldingStatsRef.current?.balanceUsd ?? 0) > 0 || gmgnHoldingHadBalanceRef.current) {
+        setGmgnHoldingPollingEnabled(true);
+        return;
+      }
+      gmgnHoldingStatsRef.current = null;
       setGmgnHoldingStats(null);
       setGmgnHoldingTokenPriceUsd(null);
       setGmgnHoldingTokenBalanceWei(null);
@@ -3226,6 +3392,9 @@ export default function App() {
   }, [siteInfo, shouldKeepTokenWarm]);
 
   useEffect(() => {
+    gmgnHoldingZeroStreakRef.current = 0;
+    gmgnHoldingHadBalanceRef.current = false;
+    gmgnHoldingStatsRef.current = null;
     if (!shouldEnableHoldingStats || !gmgnHoldingChain) {
       clearGmgnHoldingPollingTimer();
       setGmgnHoldingStats(null);
@@ -3421,6 +3590,28 @@ export default function App() {
           }
         })();
       }
+      if (message.type === 'bg:gmgn:pageQuoteLineage') {
+        return (async () => {
+          if (siteInfo?.platform !== 'gmgn') return { ok: false, error: 'not_gmgn_page' };
+          try {
+            const chain = typeof message?.chain === 'string' ? message.chain : 'bsc';
+            const tokenAddress = typeof message?.tokenAddress === 'string' ? message.tokenAddress.trim() : '';
+            const targetChainId = Number(message?.chainId) || ChainId.BNB;
+            if (!tokenAddress) return { ok: false, error: 'invalid_token' };
+            const seedTokenInfo = message?.tokenInfo as TokenInfo | undefined;
+            const lineage = await walkGmgnQuoteLineage({
+              chainId: targetChainId,
+              chain,
+              tokenAddress,
+              tokenInfo: seedTokenInfo ?? tokenInfo ?? undefined,
+              pageFetch: requestGmgnPageFetch,
+            });
+            return { ok: true, lineage };
+          } catch (e: any) {
+            return { ok: false, error: String(e?.message || e || 'gmgn_quote_lineage_failed') };
+          }
+        })();
+      }
       if (message.type === 'bg:tokenSniper:gmgnWalletAddress') {
         return (async () => {
           if (siteInfo?.platform !== 'gmgn') return { ok: false, error: 'not_gmgn_page' };
@@ -3543,8 +3734,7 @@ export default function App() {
           receiptElapsedMs: Number(message?.receiptElapsedMs ?? 0),
         });
         if (
-          message?.chainId === ChainId.SOL
-          && rawAddr
+          rawAddr
           && rawAddr.toLowerCase() === String(tokenAddressNormalized || '').toLowerCase()
         ) {
           void refreshGmgnHoldingStats(true, 'tradeSuccess');
@@ -3641,8 +3831,7 @@ export default function App() {
         const submitNode = null;
         const timing = formatTradeTiming({ submitElapsedMs: Number(message?.submitElapsedMs ?? 0) }, true);
         if (
-          message?.chainId === ChainId.SOL
-          && rawAddr
+          rawAddr
           && rawAddr.toLowerCase() === String(tokenAddressNormalized || '').toLowerCase()
         ) {
           void refreshGmgnHoldingStats(true, 'tradeSubmitted');
@@ -4183,23 +4372,55 @@ export default function App() {
     };
   };
 
-  const resolveAutoSellEntryPriceUsd = useCallback((ctx: PendingAutoSellOrderContext) => {
+  const resolveEffectiveBuyTokenOutWei = useCallback((ctx: PendingAutoSellOrderContext): string | null => {
+    const actual = String(ctx.actualTokenOutWei || '').trim();
+    const quoted = String(ctx.quotedOutWei || '').trim();
+    if (!actual) return quoted || null;
+    if (!quoted) return actual;
+    try {
+      const actualN = BigInt(actual);
+      const quotedN = BigInt(quoted);
+      if (quotedN <= 0n) return actual;
+      // Cap runaway receipt parsing (multi Transfer sum) at 125% of pre-trade quote.
+      if (actualN > (quotedN * 5n) / 4n) {
+        console.warn('[autoSell.tokenOut.clamp_to_quote]', {
+          chainId: ctx.chainId,
+          tokenAddress: ctx.tokenAddress,
+          actualTokenOutWei: actual,
+          quotedOutWei: quoted,
+        });
+        return quoted;
+      }
+      return actual;
+    } catch {
+      return actual;
+    }
+  }, []);
+
+  const resolveAutoSellEntryPriceUsd = useCallback((
+    ctx: PendingAutoSellOrderContext,
+    input: {
+      buyBaseTokenAddress: ChainAddress;
+      buyBaseTokenMeta: { symbol: string; decimals: number };
+      buyBaseTokenPriceUsd: number | null;
+    },
+  ) => {
     // Only use actual fill size from receipt. Never use protectionMinOutWei / slippage floor —
     // that understates tokens received and inflates entry (often enough to auto-trigger stop-loss).
     const rawBuyNativeAmountWei = String(ctx.buyNativeAmountWei || '').trim();
-    const rawTokenOutWei = String(ctx.actualTokenOutWei || '').trim();
+    const rawTokenOutWei = String(resolveEffectiveBuyTokenOutWei(ctx) || '').trim();
     const tokenDecimals = Number(ctx.tokenInfo?.decimals ?? 0);
     if (!rawBuyNativeAmountWei || !rawTokenOutWei) return null;
     if (!Number.isFinite(tokenDecimals) || tokenDecimals < 0) return null;
     try {
-      const spentBaseAmount = Number(formatUnits(BigInt(rawBuyNativeAmountWei), tradeBaseTokenMeta.decimals));
+      const spentBaseAmount = Number(formatUnits(BigInt(rawBuyNativeAmountWei), input.buyBaseTokenMeta.decimals));
       const receivedTokenAmount = Number(formatUnits(BigInt(rawTokenOutWei), tokenDecimals));
       if (!(Number.isFinite(receivedTokenAmount) && receivedTokenAmount > 0)) return null;
       const spentUsd = deriveUsdFromBaseAmount(
         spentBaseAmount,
-        tradeBaseTokenAddress,
-        tradeBaseTokenMeta,
-        tradeBasePriceUsd,
+        input.buyBaseTokenAddress,
+        input.buyBaseTokenMeta,
+        input.buyBaseTokenPriceUsd,
       );
       if (!(spentUsd != null && spentUsd > 0)) return null;
       const entryPriceUsd = spentUsd / receivedTokenAmount;
@@ -4207,7 +4428,7 @@ export default function App() {
     } catch {
       return null;
     }
-  }, [tradeBasePriceUsd, tradeBaseTokenAddress, tradeBaseTokenMeta]);
+  }, [resolveEffectiveBuyTokenOutWei]);
 
   const createAutoSellOrdersForWallet = useCallback(async (ctx: PendingAutoSellOrderContext) => {
     const config = settingsRef.current?.advancedAutoSell;
@@ -4216,31 +4437,67 @@ export default function App() {
     const tokenAddress = String(ctx.tokenAddress || '').trim();
     if (!tokenAddress) return 0;
     const latestTokenInfo = ctx.tokenInfo;
-    const entryPriceFromTradeUsd = resolveAutoSellEntryPriceUsd(ctx);
+    const buyBaseTokenAddress = ctx.buyBaseTokenAddress
+      ?? resolveTradeBaseTokenAddress(settingsRef.current, ctx.chainId);
+    const buyBaseTokenMeta = resolveTradeBaseTokenMeta(ctx.chainId, buyBaseTokenAddress);
+    const buyBasePriceCacheKey = getTradeBasePriceCacheKey(ctx.chainId, buyBaseTokenAddress);
+    const cachedBaseTokenPriceUsd = tradeBasePriceUsdByKey[buyBasePriceCacheKey] ?? null;
+    const fetchedBaseTokenPriceUsd = await fetchTradeBaseTokenPriceUsd(
+      ctx.siteInfo.platform,
+      ctx.chainId,
+      buyBaseTokenAddress,
+      buyBaseTokenMeta,
+    );
+    const buyBaseTokenPriceUsd = (fetchedBaseTokenPriceUsd != null && fetchedBaseTokenPriceUsd > 0)
+      ? fetchedBaseTokenPriceUsd
+      : cachedBaseTokenPriceUsd;
+    if (fetchedBaseTokenPriceUsd != null && fetchedBaseTokenPriceUsd > 0) {
+      upsertTradeBasePriceUsd(buyBasePriceCacheKey, fetchedBaseTokenPriceUsd);
+    }
+    const entryPriceFromTradeUsd = resolveAutoSellEntryPriceUsd(ctx, {
+      buyBaseTokenAddress,
+      buyBaseTokenMeta,
+      buyBaseTokenPriceUsd,
+    });
     const fetchedPriceUsd = await TokenAPI.getTokenPriceUsd(ctx.siteInfo.platform, ctx.chainId, tokenAddress, latestTokenInfo);
     const fallbackPriceUsd = Number(latestTokenInfo?.tokenPrice?.price ?? 0);
-    const marketPriceUsd = fetchedPriceUsd != null && fetchedPriceUsd > 0
-      ? fetchedPriceUsd
-      : (Number.isFinite(fallbackPriceUsd) && fallbackPriceUsd > 0 ? fallbackPriceUsd : null);
+    const mcapUsd = Number(latestTokenInfo?.tokenPrice?.marketCap ?? 0);
+    const totalSupply = Number(latestTokenInfo?.totalSupply ?? 0);
+    const mcapImpliedPriceUsd = mcapUsd > 0 && totalSupply > 0
+      ? mcapUsd / totalSupply
+      : null;
+    const marketPriceUsd = (() => {
+      const candidates = [
+        fetchedPriceUsd,
+        Number.isFinite(mcapImpliedPriceUsd) && (mcapImpliedPriceUsd as number) > 0 ? mcapImpliedPriceUsd : null,
+        Number.isFinite(fallbackPriceUsd) && fallbackPriceUsd > 0 ? fallbackPriceUsd : null,
+      ].filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
+      return candidates[0] ?? null;
+    })();
 
-    // Prefer true fill price; if missing or wildly above live market, use market.
-    // Inflated entry (e.g. from minOut/slippage floor) creates stop-loss above spot → instant sell.
+    // Prefer true fill price; reject fills that diverge too far from live market.
+    // Inflated entry → stop-loss above spot; deflated entry → take-profit below spot.
+    const ENTRY_MARKET_MIN_RATIO = 0.75;
+    const ENTRY_MARKET_MAX_RATIO = 1.35;
     let entryPriceUsd: number | null = null;
     if (entryPriceFromTradeUsd != null && entryPriceFromTradeUsd > 0) {
-      if (
-        marketPriceUsd != null
-        && marketPriceUsd > 0
-        && entryPriceFromTradeUsd > marketPriceUsd * 1.35
-      ) {
-        console.warn('[autoSell.entryPrice.reject_inflated_fill]', {
-          chainId: ctx.chainId,
-          tokenAddress,
-          entryPriceFromTradeUsd,
-          marketPriceUsd,
-          ratio: entryPriceFromTradeUsd / marketPriceUsd,
-          actualTokenOutWei: ctx.actualTokenOutWei ?? null,
-        });
-        entryPriceUsd = marketPriceUsd;
+      if (marketPriceUsd != null && marketPriceUsd > 0) {
+        const ratio = entryPriceFromTradeUsd / marketPriceUsd;
+        if (ratio > ENTRY_MARKET_MAX_RATIO || ratio < ENTRY_MARKET_MIN_RATIO) {
+          console.warn('[autoSell.entryPrice.reject_off_market_fill]', {
+            chainId: ctx.chainId,
+            tokenAddress,
+            entryPriceFromTradeUsd,
+            marketPriceUsd,
+            ratio,
+            actualTokenOutWei: ctx.actualTokenOutWei ?? null,
+            effectiveTokenOutWei: resolveEffectiveBuyTokenOutWei(ctx),
+            quotedOutWei: ctx.quotedOutWei ?? null,
+          });
+          entryPriceUsd = marketPriceUsd;
+        } else {
+          entryPriceUsd = entryPriceFromTradeUsd;
+        }
       } else {
         entryPriceUsd = entryPriceFromTradeUsd;
       }
@@ -4253,6 +4510,11 @@ export default function App() {
       chainId: ctx.chainId,
       tokenAddress,
       walletAddress: ctx.walletAddress,
+      buyBaseTokenAddress,
+      buyBaseTokenSymbol: buyBaseTokenMeta.symbol,
+      fetchedBaseTokenPriceUsd,
+      cachedBaseTokenPriceUsd,
+      buyBaseTokenPriceUsd,
       entryPriceFromTradeUsd,
       marketPriceUsd,
       selectedEntryPriceUsd: entryPriceUsd,
@@ -4299,18 +4561,45 @@ export default function App() {
 
     if (!inputs.length) return 0;
     await cancelAllSellLimitOrdersForToken(ctx.chainId, tokenAddress, ctx.walletAddress);
-    for (const input of inputs) {
-      await call({
-        type: 'limitOrder:create',
-        input: {
-          ...input,
-          fromAddress: ctx.walletAddress,
-        },
-      } as const);
-    }
+    const autoSellGmgnLineage = getGmgnLineage(ctx.chainId, tokenAddress) ?? undefined;
+    const batchInputs = inputs.map((input) => ({
+      ...input,
+      fromAddress: ctx.walletAddress,
+      gmgnQuoteLineage: autoSellGmgnLineage,
+    }));
+    const res = await call({
+      type: 'limitOrder:createBatch',
+      inputs: batchInputs,
+    } as const);
+    const createdOrders = (res as {
+      orders?: Array<{ id?: string; orderType?: string; triggerPriceUsd?: number; targetChangePercent?: number }>;
+    })?.orders ?? [];
+    const createdOrderIds = new Set<string>();
+    const createdSummaries: Array<{ id: string; orderType: string; triggerPriceUsd: number; targetChangePercent?: number }> = [];
+    createdOrders.forEach((order, index) => {
+      const input = inputs[index];
+      if (!order?.id) return;
+      createdOrderIds.add(order.id);
+      createdSummaries.push({
+        id: order.id,
+        orderType: String(order.orderType || input?.orderType || 'sell'),
+        triggerPriceUsd: Number(order.triggerPriceUsd ?? input?.triggerPriceUsd),
+        targetChangePercent: typeof order.targetChangePercent === 'number'
+          ? order.targetChangePercent
+          : input?.targetChangePercent,
+      });
+    });
+    console.info('[autoSell.orders.created]', {
+      chainId: ctx.chainId,
+      tokenAddress,
+      walletAddress: ctx.walletAddress,
+      planned: inputs.length,
+      persisted: createdOrderIds.size,
+      orders: createdSummaries,
+    });
     await followTokenForLimitOrders(tokenAddress, 'buy_auto_created_limit_orders');
-    return inputs.length;
-  }, [followTokenForLimitOrders]);
+    return createdOrderIds.size;
+  }, [followTokenForLimitOrders, resolveAutoSellEntryPriceUsd, resolveEffectiveBuyTokenOutWei, tradeBasePriceUsdByKey, upsertTradeBasePriceUsd]);
 
   const renderTradeSuccessToast = (input: {
     side: 'buy' | 'sell';
@@ -4534,6 +4823,10 @@ export default function App() {
                 solanaTipRecipient: chainId === ChainId.SOL && hasBuyTip ? resolvedBuyTip.tipRecipient : undefined,
                 gasPreset: buyGasPreset,
                 tokenInfo: tokenInfo ?? undefined,
+                preparedRouteDescs: evmRoutePreparedDescsRef.current ?? undefined,
+                gmgnQuoteLineage: gmgnLineageRef.current
+                  ?? getGmgnLineage(chainId, tokenAddressNormalized)
+                  ?? undefined,
               } as const;
               let res;
               try {
@@ -4624,6 +4917,7 @@ export default function App() {
               tokenAddress: tokenAddressNormalized,
               walletAddress,
               buyNativeAmountWei,
+              buyBaseTokenAddress: tradeBaseTokenAddress,
               actualTokenOutWei: (res as any)?.actualTokenOutWei ?? null,
               quotedOutWei: (res as any)?.quotedOutWei ?? null,
               siteInfo,
@@ -4883,7 +5177,11 @@ export default function App() {
                 solanaTipProviderType: chainId === ChainId.SOL && hasSellTip ? resolvedSellTip.providerType ?? undefined : undefined,
                 solanaTipRecipient: chainId === ChainId.SOL && hasSellTip ? resolvedSellTip.tipRecipient : undefined,
                 gasPreset: sellGasPreset,
-                tokenInfo: tokenInfo ?? undefined
+                tokenInfo: tokenInfo ?? undefined,
+                preparedRouteDescs: evmRoutePreparedDescsRef.current ?? undefined,
+                gmgnQuoteLineage: gmgnLineageRef.current
+                  ?? getGmgnLineage(chainId, tokenAddressNormalized)
+                  ?? undefined,
               } as const;
               try {
                 const res = await call({

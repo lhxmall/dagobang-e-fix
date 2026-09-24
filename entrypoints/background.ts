@@ -8,7 +8,9 @@ import {
   cancelAllLimitOrders, cancelAllSellLimitOrdersForToken, cancelLimitOrder,
   clearExecutedLimitOrders,
   createLimitOrder,
-  listLimitOrders
+  createLimitOrdersBatch,
+  listLimitOrders,
+  patchLimitOrder,
 } from '@/services/limitOrders/store';
 import { createCookingLaunchAutoSellOrders } from '@/services/limitOrders/cookingAutoSell';
 import { debugLogTxError, extractDisplayErrorMessageFromError, extractRevertReasonFromError, serializeTxError, tryGetReceiptRevertReason } from '@/services/tx/errors';
@@ -17,6 +19,7 @@ import { createXSniperTrade } from '@/services/xSniper/xSniperTrade';
 import { createTokenSniperTrade } from '@/services/tokenSniper/tokenSniperTrade';
 import { createNewCoinSniperTrade } from '@/services/newCoinSniper/newCoinSniperTrade';
 import { createLimitOrderExecutor, tickLimitOrdersForToken } from '@/services/limitOrders/executor';
+import { refreshLimitOrderRouteForToken } from '@/services/limitOrders/routeTopology';
 import type { BgRequest, GmgnTokenSnapshot, LimitOrderScanStatus, NewPoolMonitorUiDetail, SubmitChannel, TxSellInput, UnifiedMarketSignalSource } from '@/types/extention';
 import { TokenFourmemeService } from '@/services/token/fourmeme';
 import { TokenFlapLaunchService } from '@/services/token/flapLaunch';
@@ -1027,15 +1030,17 @@ export default defineBackground(() => {
     tokenInfo?: any | null;
     fromAddress?: string;
   }) => {
-    if (input.chainId !== ChainId.SOL) return;
-    scheduleSolanaTradePrewarm({
-      chainId: input.chainId,
-      tokenAddress: input.tokenAddress,
-      tokenInfo: input.tokenInfo ?? undefined,
-      fromAddress: input.fromAddress,
-      platform: String(input.tokenInfo?.launchpad_platform || input.tokenInfo?.launchpad || '').trim() || undefined,
-      ttlMs: 15_000,
-    });
+    if (input.chainId === ChainId.SOL) {
+      scheduleSolanaTradePrewarm({
+        chainId: input.chainId,
+        tokenAddress: input.tokenAddress,
+        tokenInfo: input.tokenInfo ?? undefined,
+        fromAddress: input.fromAddress,
+        platform: String(input.tokenInfo?.launchpad_platform || input.tokenInfo?.launchpad || '').trim() || undefined,
+        ttlMs: 15_000,
+      });
+      return;
+    }
   };
   const limitOrderExecutor = createLimitOrderExecutor({
     onOrdersChanged: () => {
@@ -1099,7 +1104,7 @@ export default defineBackground(() => {
     resolveLatestTokenInfo: resolveLatestLimitOrderTokenInfo,
     onStateChanged: broadcastStateChange,
     onObserveOrder: ({ order, tokenInfo }) => {
-      if (order.side !== 'buy' || order.status !== 'open') return;
+      if (order.status !== 'open') return;
       scheduleLimitOrderPrewarm({
         chainId: order.chainId,
         tokenAddress: order.tokenAddress,
@@ -1992,13 +1997,22 @@ export default defineBackground(() => {
 
           case 'limitOrder:create': {
             const order = await createLimitOrder(msg.input);
-            if (order.side === 'buy') {
-              scheduleLimitOrderPrewarm({
+            scheduleLimitOrderPrewarm({
+              chainId: order.chainId,
+              tokenAddress: order.tokenAddress,
+              tokenInfo: order.tokenInfo ?? null,
+              fromAddress: order.fromAddress,
+            });
+            if (order.chainId !== ChainId.SOL && order.tokenInfo) {
+              void refreshLimitOrderRouteForToken({
                 chainId: order.chainId,
                 tokenAddress: order.tokenAddress,
-                tokenInfo: order.tokenInfo ?? null,
-                fromAddress: order.fromAddress,
-              });
+                tokenInfo: order.tokenInfo,
+                baseTokenAddress: order.baseTokenAddress,
+                gmgnQuoteLineageHint: order.gmgnQuoteLineage ?? msg.input.gmgnQuoteLineage,
+              }).then((refreshed) => {
+                if (refreshed) broadcastStateChange();
+              }).catch(() => { });
             }
             // Same as BSC: follow on GMGN so token_stat WS pushes feed limit-order prices.
             void ensureGmgnFollowForLimitOrder({
@@ -2008,6 +2022,38 @@ export default defineBackground(() => {
             broadcastStateChange();
             limitOrderScanner?.scheduleFromStorage().catch(() => { });
             return { ok: true, order };
+          }
+
+          case 'limitOrder:createBatch': {
+            const orders = await createLimitOrdersBatch(msg.inputs);
+            const anchor = orders[0] ?? msg.inputs[0];
+            if (anchor) {
+              scheduleLimitOrderPrewarm({
+                chainId: anchor.chainId,
+                tokenAddress: anchor.tokenAddress,
+                tokenInfo: anchor.tokenInfo ?? null,
+                fromAddress: anchor.fromAddress,
+              });
+              if (anchor.chainId !== ChainId.SOL && anchor.tokenInfo) {
+                const routeAnchor = orders.find((o) => o.gmgnQuoteLineage?.length) ?? orders[0];
+                void refreshLimitOrderRouteForToken({
+                  chainId: anchor.chainId,
+                  tokenAddress: anchor.tokenAddress,
+                  tokenInfo: anchor.tokenInfo,
+                  baseTokenAddress: anchor.baseTokenAddress ?? routeAnchor?.baseTokenAddress,
+                  gmgnQuoteLineageHint: routeAnchor?.gmgnQuoteLineage ?? anchor.gmgnQuoteLineage,
+                }).then((refreshed) => {
+                  if (refreshed) broadcastStateChange();
+                }).catch(() => { });
+              }
+              void ensureGmgnFollowForLimitOrder({
+                chainId: anchor.chainId,
+                tokenAddress: anchor.tokenAddress,
+              }).catch(() => { });
+            }
+            broadcastStateChange();
+            limitOrderScanner?.scheduleFromStorage().catch(() => { });
+            return { ok: true, orders };
           }
 
           case 'limitOrder:cancel': {
@@ -2098,8 +2144,12 @@ export default defineBackground(() => {
               await ensureSolanaTradePrewarm(msg.input);
               return { ok: true, route: null };
             }
-            const route = await getTrade(msg.input.chainId).prewarmTurbo(msg.input);
-            return { ok: true, route: route ?? null };
+            const warmed = await getTrade(msg.input.chainId).prewarmTurbo(msg.input);
+            return {
+              ok: true,
+              route: warmed?.preview ?? null,
+              routeDescs: warmed?.routeDescs ?? null,
+            };
           }
 
           case 'trade:previewRoute': {

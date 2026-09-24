@@ -18,6 +18,7 @@ function addAddress(out: string[], address?: string | null) {
 /** Native + wrapped native + stables used as 底池 terminals. Not CAKE/ASTER/etc. */
 export function getTradeRouteStableAddresses(chainId: number): string[] {
   const out: string[] = [];
+  // BSC meme/DEX liquidity is still overwhelmingly USDT-first; keep that order.
   addAddress(out, USDT[chainId as ChainId]?.address);
   addAddress(out, USDC[chainId as ChainId]?.address);
   if (chainId === ChainId.BNB) addAddress(out, bscTokens.usd1.address);

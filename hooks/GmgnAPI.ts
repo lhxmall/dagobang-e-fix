@@ -3,8 +3,15 @@
  * Handles API calls to GMGN with proper authentication and headers
  */
 import { PancakeFactoryV2, PancakeFactoryV3 } from "@/constants/contracts/address";
+
+const BSC_UNISWAP_V3_FACTORY = '0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7';
+import { ChainId } from "@/constants/chains/chainId";
 import { toGmgnChainName } from "@/constants/chains";
+import { getChainIdByName } from "@/constants/chains/chainName";
 import { TokenStat, TokenInfo } from "@/types/token";
+import { getConfiguredPancakeInfinityClPoolManager } from "@/services/trade/tradePancakeInfinity";
+import { isBytes32PoolId } from "@/utils/dexUtils";
+import { resolveMutilWindowLineageHop } from "@/utils/mutilWindowTokenInfo";
 import { parseUnits } from "viem";
 import { getSettings } from "@/services/storage";
 
@@ -27,6 +34,7 @@ export interface MultiTokenInfoResponse {
     migration_market_cap_quote?: string;
     biggest_pool_address?: string;
     migrated_pool?: string;
+    launch_quote_address?: string;
     pool?: {
       pool_address?: string;
       quote_address?: string;
@@ -493,46 +501,7 @@ export class GmgnAPI {
 
     const task = (async (): Promise<TokenInfo | null> => {
       try {
-        let mergedInfo = await this.fetchTokenInfoByEndpoint(
-          '/multi_token_info',
-          this.TOKEN_INFO_BASE_URL,
-          normalizedChain,
-          normalizedAddress
-        );
-        const needsLatestFallback = !mergedInfo
-          || !mergedInfo.symbol
-          || !mergedInfo.name
-          || !(mergedInfo.decimals >= 0)
-          || (!mergedInfo.quote_token_address && !mergedInfo.pool_pair);
-        if (needsLatestFallback) {
-          const latestInfo = await this.fetchTokenInfoByEndpoint(
-            '/mutil_window_token_info',
-            this.CANDLES_BASE_URL,
-            normalizedChain,
-            normalizedAddress
-          ).catch(() => null);
-          if (!mergedInfo) {
-            mergedInfo = latestInfo;
-          } else if (latestInfo) {
-            mergedInfo = {
-              ...mergedInfo,
-              symbol: mergedInfo.symbol || latestInfo.symbol,
-              name: mergedInfo.name || latestInfo.name,
-              decimals: mergedInfo.decimals > 0 ? mergedInfo.decimals : latestInfo.decimals,
-              logo: mergedInfo.logo || latestInfo.logo,
-              quote_token: mergedInfo.quote_token || latestInfo.quote_token,
-              quote_token_address: mergedInfo.quote_token_address || latestInfo.quote_token_address,
-              pool_pair: mergedInfo.pool_pair || latestInfo.pool_pair,
-              biggest_pool_address: mergedInfo.biggest_pool_address || latestInfo.biggest_pool_address,
-              tpool_exchange: mergedInfo.tpool_exchange || latestInfo.tpool_exchange,
-              tpool_launch_type: mergedInfo.tpool_launch_type || latestInfo.tpool_launch_type,
-              tpool_pool_address: mergedInfo.tpool_pool_address || latestInfo.tpool_pool_address,
-              dex_type: mergedInfo.dex_type || latestInfo.dex_type,
-              tokenPrice: mergedInfo.tokenPrice ?? latestInfo.tokenPrice,
-              totalSupply: mergedInfo.totalSupply || latestInfo.totalSupply,
-            };
-          }
-        }
+        const mergedInfo = await this.fetchMergedGmgnTokenInfo(normalizedChain, normalizedAddress);
         this.tokenTradeInfoCache.set(key, { ts: Date.now(), value: mergedInfo });
         return mergedInfo;
       } finally {
@@ -897,6 +866,52 @@ export class GmgnAPI {
     }, this.CANDLES_BASE_URL);
   }
 
+  /**
+   * Page-world POST builder for /mutil_window_token_info. Call from the gmgn
+   * content script only (via requestGmgnPageFetch) — the service worker cannot
+   * fetch this endpoint directly (CORS + GMGN auth cookies only available in
+   * the page main world). Returns the request descriptor; the caller performs
+   * the fetch and parses payload.data.
+   */
+  public static async buildMultiWindowTokenInfoPageRequest(
+    chain: string,
+    addresses: string[]
+  ): Promise<GmgnPageFetchRequest> {
+    const normalizedChain = this.normalizeChainName(chain);
+    const normalized = Array.from(new Set(
+      addresses.map((a) => String(a || '').trim().toLowerCase()).filter((a) => /^0x[a-f0-9]{40}$/.test(a))
+    ));
+    if (!normalizedChain || normalized.length <= 0) {
+      throw new Error('Invalid GMGN mutil_window_token_info params');
+    }
+    return await this.buildPagePostJsonRequest('/mutil_window_token_info', {
+      chain: normalizedChain,
+      addresses: normalized,
+    }, this.CANDLES_BASE_URL);
+  }
+
+  /**
+   * Page-world POST builder for /multi_token_info (launchpad/tpool metadata).
+   * Pair with buildMultiWindowTokenInfoPageRequest — routing needs both APIs.
+   */
+  public static async buildMultiTokenInfoPageRequest(
+    chain: string,
+    addresses: string[]
+  ): Promise<GmgnPageFetchRequest> {
+    const normalizedChain = this.normalizeChainName(chain);
+    const normalized = Array.from(new Set(
+      addresses.map((a) => String(a || '').trim().toLowerCase()).filter((a) => /^0x[a-f0-9]{40}$/.test(a))
+    ));
+    if (!normalizedChain || normalized.length <= 0) {
+      throw new Error('Invalid GMGN multi_token_info params');
+    }
+    return await this.buildPagePostJsonRequest('/multi_token_info', {
+      chain: normalizedChain,
+      addresses: normalized,
+    }, this.TOKEN_INFO_BASE_URL);
+  }
+
+
   public static async unfollowTokens(
     chain: string,
     tokens: Array<{ tokenAddress: string; groupId?: string }>
@@ -1238,55 +1253,13 @@ export class GmgnAPI {
   public static async getTokenInfo(chain: string, address: string): Promise<TokenInfo | null> {
     const normalizedChain = this.normalizeChainName(chain);
     try {
-      const [tokenInfo, linkInfo] = await Promise.all([
-        this.fetchTokenInfoByEndpoint(
-          '/multi_token_info',
-          this.TOKEN_INFO_BASE_URL,
-          normalizedChain,
-          address
-        ),
+      const [mergedInfo, linkInfo] = await Promise.all([
+        this.fetchMergedGmgnTokenInfo(normalizedChain, address),
         this.fetchTokenLinkInfo(normalizedChain, address).catch((error) => {
           console.warn('Failed to fetch GMGN token link info:', error);
           return null;
         }),
       ]);
-      let mergedInfo = tokenInfo;
-      const needsLatestFallback = !mergedInfo
-        || !mergedInfo.symbol
-        || !mergedInfo.name
-        || !(mergedInfo.decimals >= 0)
-        || !mergedInfo.quote_token_address;
-      if (needsLatestFallback) {
-        const latestInfo = await this.fetchTokenInfoByEndpoint(
-          '/mutil_window_token_info',
-          this.CANDLES_BASE_URL,
-          normalizedChain,
-          address
-        ).catch((error) => {
-          console.warn('Failed to fetch GMGN latest token info:', error);
-          return null;
-        });
-        if (!mergedInfo) {
-          mergedInfo = latestInfo;
-        } else if (latestInfo) {
-          mergedInfo = {
-            ...mergedInfo,
-            symbol: mergedInfo.symbol || latestInfo.symbol,
-            name: mergedInfo.name || latestInfo.name,
-            decimals: mergedInfo.decimals > 0 ? mergedInfo.decimals : latestInfo.decimals,
-            logo: mergedInfo.logo || latestInfo.logo,
-            quote_token: mergedInfo.quote_token || latestInfo.quote_token,
-            quote_token_address: mergedInfo.quote_token_address || latestInfo.quote_token_address,
-            pool_pair: mergedInfo.pool_pair || latestInfo.pool_pair,
-            biggest_pool_address: mergedInfo.biggest_pool_address || latestInfo.biggest_pool_address,
-            tpool_exchange: mergedInfo.tpool_exchange || latestInfo.tpool_exchange,
-            tpool_launch_type: mergedInfo.tpool_launch_type || latestInfo.tpool_launch_type,
-            tpool_pool_address: mergedInfo.tpool_pool_address || latestInfo.tpool_pool_address,
-            tokenPrice: mergedInfo.tokenPrice ?? latestInfo.tokenPrice,
-            totalSupply: mergedInfo.totalSupply || latestInfo.totalSupply,
-          };
-        }
-      }
       if (!mergedInfo) return null;
       return {
         ...mergedInfo,
@@ -1380,6 +1353,88 @@ export class GmgnAPI {
     };
   }
 
+  /**
+   * Authoritative routing fields from /mutil_window_token_info; launchpad metadata
+   * from /multi_token_info when available. Never use launch_quote_address for hops.
+   */
+  private static async fetchMergedGmgnTokenInfo(chain: string, address: string): Promise<TokenInfo | null> {
+    const normalizedChain = this.normalizeChainName(chain);
+    const [windowInfo, metaInfo] = await Promise.all([
+      this.fetchTokenInfoByEndpoint(
+        '/mutil_window_token_info',
+        this.CANDLES_BASE_URL,
+        normalizedChain,
+        address,
+      ).catch(() => null),
+      this.fetchTokenInfoByEndpoint(
+        '/multi_token_info',
+        this.TOKEN_INFO_BASE_URL,
+        normalizedChain,
+        address,
+      ).catch(() => null),
+    ]);
+    let mergedInfo = windowInfo ?? metaInfo;
+    if (windowInfo && metaInfo) {
+      mergedInfo = this.mergeGmgnTokenInfo(windowInfo, metaInfo);
+    }
+    return mergedInfo;
+  }
+
+  /** Merge raw GMGN rows: mutil_window (routing) + multi_token_info (launchpad/tpool). */
+  public static mergeGmgnApiTokenRows(
+    windowRow: Record<string, unknown> | null | undefined,
+    metaRow: Record<string, unknown> | null | undefined,
+  ): Record<string, unknown> | null {
+    if (!windowRow && !metaRow) return null;
+    if (!windowRow) return metaRow ?? null;
+    if (!metaRow) return windowRow;
+    const windowPool = windowRow.pool as Record<string, unknown> | undefined;
+    const metaPool = metaRow.pool as Record<string, unknown> | undefined;
+    const windowTpool = windowRow.tpool as Record<string, unknown> | undefined;
+    const metaTpool = metaRow.tpool as Record<string, unknown> | undefined;
+    return {
+      ...metaRow,
+      ...windowRow,
+      pool: windowPool ?? metaPool,
+      tpool: metaTpool ?? windowTpool,
+      launchpad: metaRow.launchpad ?? windowRow.launchpad,
+      launchpad_platform: metaRow.launchpad_platform ?? windowRow.launchpad_platform,
+      launchpad_status: metaRow.launchpad_status ?? windowRow.launchpad_status,
+      launchpad_progress: metaRow.launchpad_progress ?? windowRow.launchpad_progress,
+    };
+  }
+
+  private static mergeGmgnTokenInfo(primary: TokenInfo, secondary: TokenInfo): TokenInfo {
+    return {
+      ...secondary,
+      ...primary,
+      symbol: primary.symbol || secondary.symbol,
+      name: primary.name || secondary.name,
+      decimals: primary.decimals > 0 ? primary.decimals : secondary.decimals,
+      logo: primary.logo || secondary.logo,
+      // /mutil_window_token_info — authoritative routing quote/pool
+      quote_token: primary.quote_token || secondary.quote_token,
+      quote_token_address: primary.quote_token_address || secondary.quote_token_address,
+      pool_pair: primary.pool_pair || secondary.pool_pair,
+      biggest_pool_address: primary.biggest_pool_address || secondary.biggest_pool_address,
+      pool_factory: primary.pool_factory || secondary.pool_factory,
+      pool_exchange: primary.pool_exchange || secondary.pool_exchange,
+      dex_type: primary.dex_type || secondary.dex_type,
+      tokenPrice: primary.tokenPrice ?? secondary.tokenPrice,
+      totalSupply: primary.totalSupply || secondary.totalSupply,
+      // /multi_token_info — authoritative launchpad / inner-pool metadata
+      launchpad: secondary.launchpad || primary.launchpad,
+      launchpad_platform: secondary.launchpad_platform || primary.launchpad_platform,
+      launchpad_status: Number.isFinite(Number(secondary.launchpad_status))
+        ? Number(secondary.launchpad_status)
+        : primary.launchpad_status,
+      launchpad_progress: secondary.launchpad_progress ?? primary.launchpad_progress,
+      tpool_exchange: secondary.tpool_exchange || primary.tpool_exchange,
+      tpool_launch_type: secondary.tpool_launch_type || primary.tpool_launch_type,
+      tpool_pool_address: secondary.tpool_pool_address || primary.tpool_pool_address,
+    };
+  }
+
   private static async fetchTokenInfoByEndpoint(
     endpoint: string,
     baseUrl: string,
@@ -1410,6 +1465,52 @@ export class GmgnAPI {
       return this.normalizeTokenInfo(result.data[0], normalizedChain);
     }
     return null;
+  }
+
+  /**
+   * Batch-query the /mutil_window_token_info endpoint for multiple addresses.
+   * Returns the authoritative biggest-pool quote + pool address for each token,
+   * which is the root-cause data source for quote-lineage routing (no heuristics,
+   * no BNC4 fallback guessing). Used to resolve multi-hop quote chains like
+   * ABS→BNCB→BNC4→USDT in one iterative walk with real pool addresses.
+   */
+  public static async getMultiWindowTokenInfoBatch(
+    chain: string,
+    addresses: string[]
+  ): Promise<Map<string, { quoteAddress: string; poolAddress: string; quoteSymbol: string; exchange: string }>> {
+    const out = new Map<string, { quoteAddress: string; poolAddress: string; quoteSymbol: string; exchange: string }>();
+    const normalizedChain = this.normalizeChainName(chain);
+    const normalized = Array.from(new Set(
+      addresses.map((a) => String(a || '').trim().toLowerCase()).filter((a) => /^0x[a-f0-9]{40}$/.test(a))
+    ));
+    if (!normalized.length) return out;
+    const url = await this.buildApiUrl('/mutil_window_token_info', { worker: '0' }, this.CANDLES_BASE_URL);
+    const headers = await this.getHeaders();
+    const payload = { chain: normalizedChain, addresses: normalized };
+    const response = await this.makeRequest(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) return out;
+    const result = await response.json() as MultiTokenInfoResponse;
+    if (result.code !== 0 || !Array.isArray(result.data)) return out;
+    const chainId = getChainIdByName(normalizedChain) ?? ChainId.BNB;
+    for (const item of result.data) {
+      const self = String(item.address || '').trim().toLowerCase();
+      if (!self) continue;
+      const hop = resolveMutilWindowLineageHop(chainId, self, item);
+      if (!hop) continue;
+      const quoteSymbol = String(item.pool?.quote_symbol || item.tpool?.quote_address || '').trim();
+      const exchange = String(item.pool?.exchange || item.tpool?.exchange || '').trim();
+      out.set(self, {
+        quoteAddress: hop.quote,
+        poolAddress: hop.poolAddress,
+        quoteSymbol,
+        exchange,
+      });
+    }
+    return out;
   }
 
   private static pickFirstString(...values: unknown[]): string | undefined {
@@ -1485,27 +1586,50 @@ export class GmgnAPI {
 
   private static normalizeTokenInfo(tokenData: MultiTokenInfoResponse['data'][number], chain: string): TokenInfo {
       const selfAddress = String(tokenData.address || '').trim().toLowerCase();
-      const tpoolQuoteAddress = String(tokenData.tpool?.quote_address || '').trim();
-      const poolQuoteAddress = String(tokenData.pool?.quote_address || '').trim();
-      const quoteTokenAddress = (() => {
-        if (tpoolQuoteAddress && tpoolQuoteAddress.toLowerCase() !== selfAddress) return tpoolQuoteAddress;
-        if (poolQuoteAddress && poolQuoteAddress.toLowerCase() !== selfAddress) return poolQuoteAddress;
-        if (tpoolQuoteAddress) return tpoolQuoteAddress;
-        if (poolQuoteAddress) return poolQuoteAddress;
-        return undefined;
-      })();
-    const quoteToken = tokenData.migration_market_cap_quote || tokenData.pool?.quote_symbol || '';
-    const exchange = tokenData.tpool?.exchange;
+      const chainId = getChainIdByName(this.normalizeChainName(chain)) ?? 56;
+      const lineageHop = resolveMutilWindowLineageHop(chainId, selfAddress, tokenData);
+      const poolQuoteAddress = String(
+        (tokenData.pool as { quote_address?: string | null } | undefined)?.quote_address
+        || tokenData.tpool?.quote_address
+        || '',
+      ).trim().toLowerCase();
+      const quoteTokenAddress = (
+        (/^0x[a-f0-9]{40}$/.test(poolQuoteAddress) && poolQuoteAddress !== selfAddress
+          ? poolQuoteAddress
+          : null)
+        ?? lineageHop?.quote
+        ?? undefined
+      );
+      const poolRefAddress = String(
+        (tokenData.pool as { pool_address?: string | null } | undefined)?.pool_address
+        || tokenData.biggest_pool_address
+        || tokenData.tpool?.pool_address
+        || '',
+      ).trim();
+      const hopPoolAddress = lineageHop?.poolAddress
+        || (/^0x[a-f0-9]{40}$/i.test(poolRefAddress) || /^0x[a-f0-9]{64}$/i.test(poolRefAddress)
+          ? poolRefAddress.toLowerCase()
+          : undefined);
+    const quoteToken = lineageHop
+      ? (tokenData.pool?.quote_symbol || tokenData.tpool?.quote_address || '')
+      : (tokenData.migration_market_cap_quote || tokenData.pool?.quote_symbol || '');
+    const poolExchange = String(tokenData.pool?.exchange || '').trim();
+    const exchange = poolExchange || tokenData.tpool?.exchange;
+    const poolFactory = String(
+      (tokenData.pool as { factory?: string | null } | undefined)?.factory || '',
+    ).trim().toLowerCase() || undefined;
     const launchType = String(tokenData.tpool?.launch_type || '').trim().toLowerCase();
     const isMigrated = launchType === 'migrated' || Number(tokenData.launchpad_status || 0) === 1;
     const biggestPoolAddress = tokenData.biggest_pool_address || undefined;
     const migratedPoolAddress = String(tokenData.migrated_pool || '').trim() || undefined;
     const tpoolPoolAddress = tokenData.tpool?.pool_address || tokenData.pool?.pool_address || migratedPoolAddress || undefined;
     const launchpadPlatform = String(tokenData.launchpad_platform || tokenData.launchpad || '').trim().toLowerCase();
-    const looksV4Pool = /^0x[a-fA-F0-9]{64}$/.test(String(biggestPoolAddress || migratedPoolAddress || tpoolPoolAddress || ''));
+    const looksV4Pool = isBytes32PoolId(biggestPoolAddress || migratedPoolAddress || tpoolPoolAddress || hopPoolAddress || '');
+    const isPancakeInfinityFactory = poolFactory === getConfiguredPancakeInfinityClPoolManager().toLowerCase();
     const dexType = this.getDexType(exchange)
-      || ((isMigrated && looksV4Pool) || launchpadPlatform === 'o1' || launchpadPlatform.startsWith('o1_')
-        || launchpadPlatform === 'long' || launchpadPlatform === 'longxyz' || launchpadPlatform === 'long.xyz'
+      || (isPancakeInfinityFactory && looksV4Pool ? 'PANCAKE_INFINITY_V4' : undefined)
+      || (((isMigrated && looksV4Pool && !isPancakeInfinityFactory) || launchpadPlatform === 'o1' || launchpadPlatform.startsWith('o1_')
+        || launchpadPlatform === 'long' || launchpadPlatform === 'longxyz' || launchpadPlatform === 'long.xyz')
         ? 'UNISWAP_V4'
         : undefined);
     const totalSupply = this.normalizeTotalSupply(
@@ -1637,11 +1761,13 @@ export class GmgnAPI {
       launchpad_status: Number(tokenData.launchpad_status || 0),
       quote_token: quoteToken,
       quote_token_address: quoteTokenAddress,
-      pool_pair: isMigrated ? (migratedPoolAddress || tpoolPoolAddress || biggestPoolAddress) : undefined,
+      pool_pair: hopPoolAddress || (isMigrated ? (migratedPoolAddress || tpoolPoolAddress || biggestPoolAddress) : undefined),
       biggest_pool_address: biggestPoolAddress,
       tpool_exchange: exchange,
       tpool_launch_type: launchType || undefined,
       tpool_pool_address: tpoolPoolAddress,
+      pool_factory: poolFactory,
+      pool_exchange: poolExchange || undefined,
       dex_type: dexType,
       tokenPrice: this.normalizeOptionalNumberString(normalizedPriceRaw)
         ? {
@@ -1657,11 +1783,29 @@ export class GmgnAPI {
 
   public static getDexType(exchange?: string): string | undefined {
     if (!exchange) return undefined;
-    if (exchange.toLowerCase() === PancakeFactoryV3.toLowerCase()) {
+    const lower = exchange.toLowerCase();
+    if (
+      lower === PancakeFactoryV3.toLowerCase()
+      || lower === 'pancake_v3'
+      || lower === 'pancakeswap_v3'
+    ) {
       return 'PANCAKE_SWAP_V3';
     }
-    if (exchange.toLowerCase() === PancakeFactoryV2.toLowerCase()) {
+    if (
+      lower === PancakeFactoryV2.toLowerCase()
+      || lower === 'pancake_v2'
+      || lower === 'pancakeswap_v2'
+    ) {
       return 'PANCAKE_SWAP';
+    }
+    if (
+      lower === BSC_UNISWAP_V3_FACTORY.toLowerCase()
+      || lower === 'uniswap_v3'
+    ) {
+      return 'UNISWAP_V3';
+    }
+    if (lower === 'uniswap_v4' || lower === 'uniswapv4') {
+      return 'UNISWAP_V4';
     }
     return undefined;
   }

@@ -15,6 +15,8 @@ export enum SwapType {
   PRINTR_EXACT_IN = 8,
   OPEN_FOUR_EXACT_IN = 9,
   LIKWID_EXACT_IN = 10,
+  GENIUS_BUY = 11,
+  GENIUS_SELL = 12,
 }
 
 export function toHyperDexSwapType(swapType: SwapType): HyperSwapType {
@@ -95,6 +97,7 @@ export function getRouterSwapDesc(params: {
   data?: Hex;
   poolManager?: Address;
   hooks?: Address;
+  parameters?: Hex;
 }): SwapDescLike {
   return {
     swapType: params.swapType,
@@ -106,7 +109,7 @@ export function getRouterSwapDesc(params: {
     hooks: params.hooks ?? ZERO_ADDRESS,
     hookData: '0x',
     poolManager: params.poolManager ?? ZERO_ADDRESS,
-    parameters: ZERO32,
+    parameters: params.parameters ?? ZERO32,
     data: params.data ?? '0x',
   };
 }

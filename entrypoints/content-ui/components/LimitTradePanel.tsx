@@ -6,6 +6,7 @@ import type { Account, Settings, LimitOrder, LimitOrderCreateInput, LimitOrderSc
 import type { TokenInfo } from '@/types/token';
 import { t, normalizeLocale, type Locale } from '@/utils/i18n';
 import { call } from '@/utils/messaging';
+import { getGmgnLineage } from '@/utils/gmgnLineageStore';
 import { formatPriceValue, parseNumberLoose, formatTime } from '@/utils/format';
 import { useTradeSuccessSound } from '@/hooks/useTradeSuccessSound';
 import { navigateToUrl, parsePlatformTokenLink, type SiteInfo } from '@/utils/sites';
@@ -900,6 +901,8 @@ export function LimitTradePanel({
                 trailingStopBps: o.trailingStopBps,
                 trailingPeakPriceUsd: o.trailingPeakPriceUsd,
                 tokenInfo: o.tokenInfo,
+                gmgnQuoteLineage: o.gmgnQuoteLineage ?? getGmgnLineage(o.chainId, o.tokenAddress) ?? undefined,
+                gmgnLineageLaunchpadStatus: o.gmgnLineageLaunchpadStatus,
               };
               await call({ type: 'limitOrder:create', input } as const);
               await onLimitOrdersCreated?.(o.tokenAddress);
@@ -1116,6 +1119,7 @@ export function LimitTradePanel({
                           buyNativeAmountWei: amountWei,
                           tokenInfo,
                           fromAddress: walletAddress,
+                          gmgnQuoteLineage: getGmgnLineage(chainId, tokenAddress) ?? undefined,
                         },
                       });
                     }
@@ -1228,6 +1232,7 @@ export function LimitTradePanel({
                             sellPercentBps: bps,
                             tokenInfo,
                             fromAddress: walletAddress,
+                            gmgnQuoteLineage: getGmgnLineage(chainId, tokenAddress) ?? undefined,
                           },
                         });
                       }

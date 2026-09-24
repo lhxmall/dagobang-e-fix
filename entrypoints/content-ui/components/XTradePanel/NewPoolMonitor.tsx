@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AtSign, ChefHat, Coins, ExternalLink, Eye, Flame, Globe2, Image as ImageIcon, Layers3, MessageCircle, Trophy, UserStar, Users, X } from 'lucide-react';
 import { browser } from 'wxt/browser';
 import type { NewPoolMonitorUiDetail, Settings, UnifiedTwitterSignal } from '@/types/extention';
@@ -1074,82 +1074,186 @@ const getPositiveGrowthScore = (current: number | undefined, previous: number | 
   return Math.max(0, Math.min(1, (current - previous) / base));
 };
 
+/** 发酵甜蜜区：$6K ~ $120K。 */
+const getEarlyMarketCapScore = (marketCapUsd: number | undefined) => {
+  if (typeof marketCapUsd !== 'number' || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return 0;
+  if (marketCapUsd < 6_000) return 0.35;
+  if (marketCapUsd <= 120_000) return 1;
+  if (marketCapUsd <= 300_000) return 0.42;
+  if (marketCapUsd <= 600_000) return 0.18;
+  return 0.06;
+};
+
+/** 24h 成交量 / 市值。 */
+const getVolumeToMarketCapRatio = (vol24hUsd: number | undefined, marketCapUsd: number | undefined) => {
+  if (typeof marketCapUsd !== 'number' || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return null;
+  if (typeof vol24hUsd !== 'number' || !Number.isFinite(vol24hUsd) || vol24hUsd <= 0) return null;
+  return vol24hUsd / marketCapUsd;
+};
+
+/**
+ * 量价匹配：Vol ≈ MC 时常见仍在上涨段；Vol 远大于 MC 时多为砸盘后的高换手残余。
+ */
+const getVolumeMarketCapFitScore = (ratio: number | null) => {
+  if (ratio == null) return 0.5;
+  if (ratio >= 0.55 && ratio <= 1.35) return 1;
+  if (ratio >= 0.35 && ratio <= 1.85) return 0.88;
+  if (ratio >= 0.18 && ratio <= 2.5) return 0.6;
+  if (ratio > 2.5) {
+    if (ratio >= 8) return 0.04;
+    if (ratio >= 5) return 0.1;
+    if (ratio >= 3.5) return 0.2;
+    return 0.34;
+  }
+  if (ratio < 0.06) return 0.22;
+  return 0.4;
+};
+
+const getVolumeMarketCapTrendPenalty = (
+  ratio: number | null,
+  prevRatio: number | null,
+  marketCapDirection?: MarketTokenRow['marketCapDirection'],
+) => {
+  if (ratio == null || prevRatio == null || prevRatio <= 0) return 0;
+  if (ratio > prevRatio * 1.4 && ratio > 2.2 && marketCapDirection === 'down') {
+    return Math.min(0.12, ((ratio - prevRatio) / Math.max(prevRatio, 1)) * 0.1);
+  }
+  return 0;
+};
+
+type VolumeMarketCapRatioTone = 'healthy' | 'fair' | 'weak' | 'exhausted' | 'missing';
+
+const resolveVolumeMarketCapRatioTone = (ratio: number | null): VolumeMarketCapRatioTone => {
+  if (ratio == null) return 'missing';
+  if (ratio >= 0.55 && ratio <= 1.35) return 'healthy';
+  if (ratio >= 0.35 && ratio <= 1.85) return 'fair';
+  if (ratio > 2.5) return 'exhausted';
+  return 'weak';
+};
+
+const formatVolumeMarketCapRatioValue = (ratio: number | null) => {
+  if (ratio == null) return '-';
+  if (ratio >= 10) return `${ratio.toFixed(1)}x`;
+  return `${ratio.toFixed(2)}x`;
+};
+
+const getVolumeMarketCapRatioClassName = (tone: VolumeMarketCapRatioTone) => {
+  switch (tone) {
+    case 'healthy':
+      return 'text-emerald-300';
+    case 'fair':
+      return 'text-sky-300';
+    case 'weak':
+      return 'text-amber-300';
+    case 'exhausted':
+      return 'text-rose-400';
+    default:
+      return 'text-zinc-500';
+  }
+};
+
 const resolveMemeFlowRankMeta = (
   row: MarketTokenRow,
   context: {
-    viewerValues: number[];
-    holderValues: number[];
-    marketCapValues: number[];
     kolValues: number[];
     smartMoneyValues: number[];
+    holderValues: number[];
   },
   tt: (key: string, subs?: Array<string | number>) => string,
 ): MemeFlowRankMeta => {
-  const viewerScore = getPercentileScore(row.viewerCount, context.viewerValues);
-  const holderScore = getPercentileScore(row.holders, context.holderValues);
-  const marketCapScore = getPercentileScore(row.marketCapUsd, context.marketCapValues);
   const kolScore = getPercentileScore(row.kol, context.kolValues);
   const smartMoneyScore = getPercentileScore(row.smartMoney, context.smartMoneyValues);
-  const viewerDelta = getFiniteDelta(row.viewerCount, row.prevViewerCount);
-  const holderDelta = getFiniteDelta(row.holders, row.prevHolders);
-  const marketCapDelta = getFiniteDelta(row.marketCapUsd, row.prevMarketCapUsd);
-  const volDelta = getFiniteDelta(row.vol24hUsd, row.prevVol24hUsd);
+  const holderScore = getPercentileScore(row.holders, context.holderValues);
   const kolDelta = getFiniteDelta(row.kol, row.prevKol);
   const smartMoneyDelta = getFiniteDelta(row.smartMoney, row.prevSmartMoney);
-  const viewerGrowthScore = getPositiveGrowthScore(row.viewerCount, row.prevViewerCount);
-  const holderGrowthScore = getPositiveGrowthScore(row.holders, row.prevHolders);
-  const marketCapGrowthScore = getPositiveGrowthScore(row.marketCapUsd, row.prevMarketCapUsd);
-  const volGrowthScore = getPositiveGrowthScore(row.vol24hUsd, row.prevVol24hUsd);
+  const holderDelta = getFiniteDelta(row.holders, row.prevHolders);
   const kolGrowthScore = getPositiveGrowthScore(row.kol, row.prevKol);
   const smartMoneyGrowthScore = getPositiveGrowthScore(row.smartMoney, row.prevSmartMoney);
+  const holderGrowthScore = getPositiveGrowthScore(row.holders, row.prevHolders);
 
-  // 热榜看的是“现在谁最热”；
-  // 发酵看的是“谁正在扩散、正在吸筹、正在往前排走”。
-  const heatLeadScore =
-    viewerScore * 0.38 +
-    viewerGrowthScore * 0.42 +
-    kolGrowthScore * 0.12 +
-    kolScore * 0.08;
-  const spreadScore =
-    holderGrowthScore * 0.4 +
-    holderScore * 0.18 +
-    volGrowthScore * 0.18 +
-    smartMoneyGrowthScore * 0.16 +
-    smartMoneyScore * 0.08;
-  const leaderShiftScore =
-    marketCapGrowthScore * 0.55 +
-    marketCapScore * 0.25 +
-    volGrowthScore * 0.2;
-  const synergyBonus =
-    viewerGrowthScore > 0 && holderGrowthScore > 0 && (marketCapGrowthScore > 0 || volGrowthScore > 0)
-      ? 0.08
-      : viewerGrowthScore > 0 && holderGrowthScore > 0
-        ? 0.05
-        : viewerScore >= 0.75 && holderGrowthScore > 0
-          ? 0.02
+  const hasKolSignal = (typeof row.kol === 'number' && row.kol > 0) || kolDelta > 0;
+  const hasSmartMoneySignal = (typeof row.smartMoney === 'number' && row.smartMoney > 0) || smartMoneyDelta > 0;
+  const hasSmartEntrySignal = hasKolSignal || hasSmartMoneySignal;
+
+  // 发酵看的是“聪明钱/KOL 已开始介入，且市值仍处早期或刚回调”的第一入场点。
+  const smartMoneyLeadScore =
+    kolGrowthScore * 0.28 +
+    smartMoneyGrowthScore * 0.28 +
+    kolScore * 0.22 +
+    smartMoneyScore * 0.22;
+  const smartMoneySynergy =
+    kolDelta > 0 && smartMoneyDelta > 0
+      ? 0.14
+      : hasKolSignal && hasSmartMoneySignal
+        ? 0.08
+        : kolDelta > 0 || smartMoneyDelta > 0
+          ? 0.05
           : 0;
+  const earlyMarketCapScore = getEarlyMarketCapScore(row.marketCapUsd);
+  const volumeMarketCapRatio = getVolumeToMarketCapRatio(row.vol24hUsd, row.marketCapUsd);
+  const prevVolumeMarketCapRatio = getVolumeToMarketCapRatio(row.prevVol24hUsd, row.prevMarketCapUsd ?? row.marketCapUsd);
+  const volumeMarketCapFitScore = getVolumeMarketCapFitScore(volumeMarketCapRatio);
+  const volumeMarketCapTrendPenalty = getVolumeMarketCapTrendPenalty(
+    volumeMarketCapRatio,
+    prevVolumeMarketCapRatio,
+    row.marketCapDirection,
+  );
+  const volumeMarketCapExhausted = volumeMarketCapRatio != null && volumeMarketCapRatio >= 3.5;
+  const pullbackScore = (() => {
+    if (
+      row.marketCapDirection !== 'down' ||
+      typeof row.prevMarketCapUsd !== 'number' ||
+      !Number.isFinite(row.prevMarketCapUsd) ||
+      typeof row.marketCapUsd !== 'number' ||
+      !Number.isFinite(row.marketCapUsd) ||
+      row.prevMarketCapUsd <= row.marketCapUsd
+    ) return 0;
+    const dropRatio = (row.prevMarketCapUsd - row.marketCapUsd) / Math.max(row.prevMarketCapUsd, 1);
+    if (dropRatio < 0.04) return 0;
+    return Math.max(0, Math.min(1, dropRatio * 2.5));
+  })();
+  const pullbackEntryScore = pullbackScore > 0 && hasSmartEntrySignal
+    ? pullbackScore * (0.55 + smartMoneyLeadScore * 0.45)
+    : 0;
+  const holderConfirmScore = holderGrowthScore * 0.65 + holderScore * 0.35;
+  const hollowHeatPenalty =
+    (typeof row.viewerCount === 'number' && row.viewerCount >= 80) &&
+    !hasSmartEntrySignal &&
+    earlyMarketCapScore < 0.5
+      ? 0.18
+      : 0;
   const riskPenalty =
-    (row.devHasSold && holderGrowthScore <= 0 && marketCapGrowthScore <= 0 ? 0.08 : 0) +
+    (row.devHasSold && !hasSmartEntrySignal && holderGrowthScore <= 0 ? 0.1 : 0) +
     ((typeof row.devHoldPercent === 'number' && row.devHoldPercent >= 10) ? 0.12 : 0) +
     ((typeof row.top10HoldRatio === 'number' && row.top10HoldRatio >= 0.35) ? 0.08 : 0);
-  const score =
-    heatLeadScore * 0.36 +
-    spreadScore * 0.38 +
-    leaderShiftScore * 0.26 +
-    synergyBonus -
-    riskPenalty;
+
+  let score =
+    smartMoneyLeadScore * 0.34 +
+    smartMoneySynergy +
+    earlyMarketCapScore * 0.18 +
+    volumeMarketCapFitScore * 0.24 +
+    pullbackEntryScore * 0.12 +
+    holderConfirmScore * 0.06 -
+    riskPenalty -
+    hollowHeatPenalty -
+    volumeMarketCapTrendPenalty;
+  if (!hasSmartEntrySignal) score *= 0.18;
+  if (volumeMarketCapExhausted) score *= 0.72;
 
   const reasonCandidates = [
-    { label: tt('contentUi.xMonitor.memeFlowReason.heatStrong'), weight: viewerScore >= 0.82 ? heatLeadScore + 0.14 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.heatUp'), weight: viewerDelta > 0 ? viewerGrowthScore + 0.18 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.holderStrong'), weight: holderScore >= 0.72 ? spreadScore + 0.12 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.holderUp'), weight: holderDelta > 0 ? holderGrowthScore + 0.18 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.leaderStrong'), weight: marketCapDelta > 0 ? leaderShiftScore + 0.16 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.devOut'), weight: row.devHasSold && holderGrowthScore <= 0 ? riskPenalty + 0.04 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.kolIn'), weight: kolDelta > 0 ? kolGrowthScore + 0.22 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.smartMoneyIn'), weight: smartMoneyDelta > 0 ? smartMoneyGrowthScore + 0.22 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.kolIn'), weight: kolScore >= 0.55 && hasKolSignal ? kolScore + 0.12 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.smartMoneyIn'), weight: smartMoneyScore >= 0.55 && hasSmartMoneySignal ? smartMoneyScore + 0.12 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.earlyMc'), weight: earlyMarketCapScore >= 0.72 ? earlyMarketCapScore + 0.16 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.volMcHealthy'), weight: volumeMarketCapFitScore >= 0.88 ? volumeMarketCapFitScore + 0.14 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.volMcExhausted'), weight: volumeMarketCapExhausted ? 0.2 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.pullback'), weight: pullbackEntryScore > 0 ? pullbackEntryScore + 0.18 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.holderUp'), weight: holderDelta > 0 && hasSmartEntrySignal ? holderGrowthScore + 0.1 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.devOut'), weight: row.devHasSold && !hasSmartEntrySignal ? riskPenalty + 0.04 : 0 },
     { label: tt('contentUi.xMonitor.memeFlowReason.devHigh'), weight: typeof row.devHoldPercent === 'number' && row.devHoldPercent >= 10 ? riskPenalty + 0.08 : 0 },
     { label: tt('contentUi.xMonitor.memeFlowReason.topHeavy'), weight: typeof row.top10HoldRatio === 'number' && row.top10HoldRatio >= 0.35 ? riskPenalty + 0.06 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.leaderStrong'), weight: volDelta > 0 && marketCapGrowthScore > 0 ? leaderShiftScore + 0.08 : 0 },
-    { label: tt('contentUi.xMonitor.memeFlowReason.heatUp'), weight: kolDelta > 0 || smartMoneyDelta > 0 ? 0.06 : 0 },
+    { label: tt('contentUi.xMonitor.memeFlowReason.hollowHeat'), weight: hollowHeatPenalty > 0 ? hollowHeatPenalty : 0 },
   ]
     .filter((item) => item.weight > 0)
     .sort((a, b) => b.weight - a.weight);
@@ -1209,6 +1313,18 @@ function TokenRowCard({
       : 'text-rose-300'
     : 'text-transparent';
   const volumeClassName = row.vol24hUsd != null && row.vol24hUsd > 0 ? 'text-zinc-100' : 'text-zinc-500';
+  const volumeMarketCapRatio = getVolumeToMarketCapRatio(row.vol24hUsd, row.marketCapUsd);
+  const volumeMarketCapRatioTone = resolveVolumeMarketCapRatioTone(volumeMarketCapRatio);
+  const volumeMarketCapRatioClassName = getVolumeMarketCapRatioClassName(volumeMarketCapRatioTone);
+  const volumeMarketCapRatioText = formatVolumeMarketCapRatioValue(volumeMarketCapRatio);
+  const volumeMarketCapRatioTitle = (() => {
+    const base = tt('contentUi.xMonitor.tooltip.volMcRatio');
+    if (volumeMarketCapRatioTone === 'healthy') return `${base} · ${tt('contentUi.xMonitor.volMcRatioTone.healthy')}`;
+    if (volumeMarketCapRatioTone === 'fair') return `${base} · ${tt('contentUi.xMonitor.volMcRatioTone.fair')}`;
+    if (volumeMarketCapRatioTone === 'weak') return `${base} · ${tt('contentUi.xMonitor.volMcRatioTone.weak')}`;
+    if (volumeMarketCapRatioTone === 'exhausted') return `${base} · ${tt('contentUi.xMonitor.volMcRatioTone.exhausted')}`;
+    return base;
+  })();
   const top10HoldRatioPct = typeof row.top10HoldRatio === 'number' ? row.top10HoldRatio * 100 : null;
   const getRatioClassName = (pct: number | null) => {
     if (pct == null) return 'text-zinc-500';
@@ -1332,7 +1448,7 @@ function TokenRowCard({
         )}
       </div>
       <div className="min-w-0 pt-0.5">
-        <div className="grid grid-cols-[minmax(0,1fr)_78px] items-start gap-x-2 gap-y-1">
+        <div className="grid grid-cols-[minmax(0,1fr)_86px] items-start gap-x-2 gap-y-1">
           <div className="min-w-0">
             <div className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-1.5 leading-none">
               <div className="min-w-0 truncate text-[13px] font-semibold text-zinc-100">{displayName}</div>
@@ -1372,7 +1488,7 @@ function TokenRowCard({
               </div>
             ) : null}
           </div>
-          <div className="w-[78px] shrink-0 self-start pt-0.5 text-right leading-tight">
+          <div className="w-[86px] shrink-0 self-start pt-0.5 text-right leading-tight">
             <div className="flex flex-row items-center justify-end gap-0.5">
               <span className="mr-1 text-[12px] text-zinc-500">MC </span>
               <div className="flex items-center justify-end gap-0.5 text-[14px] font-semibold tabular-nums">
@@ -1384,6 +1500,13 @@ function TokenRowCard({
             </div>
             <div className={`mt-1 text-[12px] font-medium tabular-nums ${volumeClassName}`}>
               V ${row.vol24hUsd != null ? formatCompactNumber(Math.round(row.vol24hUsd)) : '-'}
+            </div>
+            <div
+              title={volumeMarketCapRatioTitle}
+              className={`mt-0.5 text-[11px] font-semibold tabular-nums ${volumeMarketCapRatioClassName}`}
+            >
+              <span className="mr-0.5 text-[10px] font-normal text-zinc-500">V/MC</span>
+              {volumeMarketCapRatioText}
             </div>
           </div>
         </div>
@@ -1520,19 +1643,21 @@ export function NewPoolMonitorContent({
     }
   }, [currentFilterStorageKey, filterDraft]);
 
+  const syncTokenIdsFromRef = useCallback(() => {
+    const map = tokenMapRef.current;
+    const nextIds = Array.from(map.values())
+      .sort((a, b) => b.sortAtMs - a.sortAtMs)
+      .slice(0, MARKET_TOKEN_CACHE_LIMIT)
+      .map((item) => normalizeMonitorTokenAddressKey(item.tokenAddress));
+    setTokenIds(nextIds);
+  }, []);
+
   useEffect(() => {
-    if (!active) return;
     let disposed = false;
     let syncTimer: ReturnType<typeof setTimeout> | null = null;
-    tokenMapRef.current.clear();
     const syncIdsNow = () => {
       if (disposed) return;
-      const map = tokenMapRef.current;
-      const nextIds = Array.from(map.values())
-        .sort((a, b) => b.sortAtMs - a.sortAtMs)
-        .slice(0, MARKET_TOKEN_CACHE_LIMIT)
-        .map((item) => normalizeMonitorTokenAddressKey(item.tokenAddress));
-      setTokenIds(nextIds);
+      syncTokenIdsFromRef();
     };
     const scheduleSyncIds = (delayMs = TOKEN_ID_SYNC_DEBOUNCE_MS) => {
       if (syncTimer != null) return;
@@ -1544,7 +1669,11 @@ export function NewPoolMonitorContent({
     const onBatch = (message: any) => {
       if (message?.type !== 'bg:newpool:batch') return;
       const items = Array.isArray(message?.items) ? message.items as MarketTokenEventDetail[] : [];
-      if (!items.length) return;
+      if (!items.length) {
+        tokenMapRef.current.clear();
+        syncIdsNow();
+        return;
+      }
       ingestRows(tokenMapRef.current, items);
       scheduleSyncIds();
     };
@@ -1553,7 +1682,6 @@ export function NewPoolMonitorContent({
       .then((res) => {
         if (disposed) return;
         const items = Array.isArray((res as any)?.items) ? (res as any).items as MarketTokenEventDetail[] : [];
-        tokenMapRef.current.clear();
         if (items.length) ingestRows(tokenMapRef.current, items);
         syncIdsNow();
       })
@@ -1566,7 +1694,12 @@ export function NewPoolMonitorContent({
       }
       browser.runtime.onMessage.removeListener(onBatch);
     };
-  }, [active]);
+  }, [syncTokenIdsFromRef]);
+
+  useEffect(() => {
+    if (!active) return;
+    syncTokenIdsFromRef();
+  }, [active, syncTokenIdsFromRef]);
 
   const tokenList = useMemo(() => {
     const map = tokenMapRef.current;
@@ -1720,9 +1853,7 @@ export function NewPoolMonitorContent({
     [scopedTokens]
   );
   const memeFlowTokens = useMemo(() => {
-    const viewerValues = buildSortedMetricValues(scopedTokens, (row) => row.viewerCount);
     const holderValues = buildSortedMetricValues(scopedTokens, (row) => row.holders);
-    const marketCapValues = buildSortedMetricValues(scopedTokens, (row) => row.marketCapUsd);
     const kolValues = buildSortedMetricValues(scopedTokens, (row) => row.kol);
     const smartMoneyValues = buildSortedMetricValues(scopedTokens, (row) => row.smartMoney);
     return scopedTokens
@@ -1730,13 +1861,23 @@ export function NewPoolMonitorContent({
         row,
         meta: resolveMemeFlowRankMeta(
           row,
-          { viewerValues, holderValues, marketCapValues, kolValues, smartMoneyValues },
+          { holderValues, kolValues, smartMoneyValues },
           tt,
         ),
       }))
       .sort((a, b) => {
         if (b.meta.score !== a.meta.score) return b.meta.score - a.meta.score;
-        return compareByViewerAndMarketCapDesc(a.row, b.row);
+        const earlyMcDiff = getEarlyMarketCapScore(b.row.marketCapUsd) - getEarlyMarketCapScore(a.row.marketCapUsd);
+        if (earlyMcDiff !== 0) return earlyMcDiff;
+        const volMcDiff =
+          getVolumeMarketCapFitScore(getVolumeToMarketCapRatio(b.row.vol24hUsd, b.row.marketCapUsd)) -
+          getVolumeMarketCapFitScore(getVolumeToMarketCapRatio(a.row.vol24hUsd, a.row.marketCapUsd));
+        if (volMcDiff !== 0) return volMcDiff;
+        const smartDiff =
+          ((b.row.smartMoney ?? 0) + (b.row.kol ?? 0)) -
+          ((a.row.smartMoney ?? 0) + (a.row.kol ?? 0));
+        if (smartDiff !== 0) return smartDiff;
+        return compareByMarketCapDesc(a.row, b.row);
       });
   }, [scopedTokens, tt]);
   const globalHotTokensForDisplay = useMemo(() => {
@@ -1864,7 +2005,7 @@ export function NewPoolMonitorContent({
                 </div>
               ) : null}
               <span>
-                {viewMode === 'memeFlow' ? '扩散优先' : viewMode === 'globalHot' ? '热度优先' : '分组视图'}
+                {viewMode === 'memeFlow' ? '早期优先' : viewMode === 'globalHot' ? '热度优先' : '分组视图'}
               </span>
             </div>
           </div>

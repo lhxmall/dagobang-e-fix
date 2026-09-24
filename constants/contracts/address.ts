@@ -64,6 +64,12 @@ export const DeployAddress: AddressMapping = {
     [ContractNames.TokenManagerHelper3]: {
       address: "0xF251F83e40a78868FcfA3FA4599Dad6494E46034",
     },
+    [ContractNames.GeniusLaunchFactory]: {
+      address: "0x37eE8AeE29C5efd3C1A7edA6dF3F510779928a37",
+    },
+    [ContractNames.GeniusMemeHook]: {
+      address: "0x8E6f8eBbD62B60085B703C40B460daE802eDC51b",
+    },
   },
   [ChainId.HYPER]: {
     [ContractNames.DagobangRouter]: {

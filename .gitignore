@@ -142,3 +142,4 @@ dist
 
 # wxt generated (recreated by `wxt prepare` / `wxt dev`)
 .wxt
+/docs

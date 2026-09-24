@@ -7,7 +7,8 @@ export const SUPPORTED_LAUNCHPADS: Partial<Record<ChainId, string[]>> = ({
         //  "four_xmode_agent", "xmode", "xmode_agent",
         "flap", "flap_stocks", "flap_aioracle",
         "printr",
-        "openfour", "likwid", "goplus_skills", "goplus_creator", "cubepeg"],
+        "openfour", "likwid", "goplus_skills", "goplus_creator", "cubepeg",
+        "geniusfun"],
 
     [ChainId.ETH]: ["livo", "trench"],
 
@@ -31,6 +32,7 @@ export const PLATFORM_OPTIONS = [
     { value: 'goplus_creator', label: 'GoPlus Creator' },
     { value: 'likwid', label: 'Likwid' },
     { value: 'cubepeg', label: 'Cubepeg' },
+    { value: 'geniusfun', label: 'Genius.fun' },
 ] as const;
 
 export const PLATFORM_OPTIONS_ETH = [
@@ -85,6 +87,7 @@ export function normalizeLaunchpadPlatform(value: unknown): string | undefined {
     if (raw === 'printr') return 'printr';
     if (raw === 'openfour' || raw === 'open four') return 'openfour';
     if (raw === 'likwid') return 'likwid';
+    if (raw === 'geniusfun' || raw === 'genius' || raw === 'genius.fun' || raw === 'genius_fun') return 'geniusfun';
     if (raw === 'alt.fun' || raw === 'altfun') return 'altfun';
     if (raw === 'pons_v1' || raw === 'pons v1') return 'pons_v1';
     if (raw === 'pons_v2' || raw === 'pons v2') return 'pons_v2';

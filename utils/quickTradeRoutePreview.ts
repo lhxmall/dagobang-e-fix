@@ -1,9 +1,9 @@
 import { ChainId } from '@/constants/chains/chainId';
 import { EVM_CHAIN_RUNTIME } from '@/constants/chains/evmRuntime';
 import { isLongLaunchpadPlatform, isO1LaunchpadPlatform } from '@/constants/launchpad';
-import { isBinance4StockTicker, isOpenFour4StockName, OPENFOUR_4STOCK_QUOTE_FALLBACK } from '@/constants/openfour';
 import { USDC } from '@/constants/tokens/chains/common';
 import { bscBnbBridgePoolConfigByTokenAddress } from '@/constants/tokens/chains/bsc';
+import { resolveEvmGmgnDirectQuoteToken } from '@/utils/bscTradeRoutePolicy';
 import { DeployAddress, OpenFourInnerLaunchpadManager } from '@/constants/contracts/address';
 import { ContractNames } from '@/constants/contracts/names';
 import { sliceOuterMarketRoute } from '@/services/trade/outerMarketRouteCache';
@@ -71,27 +71,12 @@ function isTerminalQuote(chainId: number, address: `0x${string}`): boolean {
   return isTradeRouteTerminalQuote(chainId, address);
 }
 
-function isBnc4(chainId: number, address?: string | null): boolean {
-  return chainId === ChainId.BNB
-    && !!address
-    && address.toLowerCase() === OPENFOUR_4STOCK_QUOTE_FALLBACK.address.toLowerCase();
-}
-
 function labelToken(chainId: number, address: `0x${string}`, tokenInfo: TokenInfo): string {
   return resolveRouteTokenLabel({
     chainId,
     address,
     tokenInfo,
   });
-}
-
-function isLikelyOpenFour4Stock(tokenInfo: TokenInfo): boolean {
-  return isOpenFour4StockName(tokenInfo.symbol || '', tokenInfo.name)
-    || isOpenFour4StockName(tokenInfo.name || '')
-    || isBinance4StockTicker(tokenInfo.symbol)
-    || String(tokenInfo.quote_token || '').toUpperCase() === 'BNC4'
-    || isBnc4(ChainId.BNB, tokenInfo.quote_token_address)
-    || String(tokenInfo.tpool_launch_type || '').toLowerCase().includes('4stock');
 }
 
 function hopsFromCachedRouteDescs(
@@ -116,11 +101,8 @@ function hopsFromCachedRouteDescs(
 }
 
 export function resolveEvmTradeQuoteToken(chainId: number, tokenInfo: TokenInfo): `0x${string}` | null {
-  if (chainId === ChainId.BNB && isLikelyOpenFour4Stock(tokenInfo)) {
-    return OPENFOUR_4STOCK_QUOTE_FALLBACK.address;
-  }
-  if (isBnc4(chainId, tokenInfo.quote_token_address) || String(tokenInfo.quote_token || '').toUpperCase() === 'BNC4') {
-    return OPENFOUR_4STOCK_QUOTE_FALLBACK.address;
+  if (chainId === ChainId.BNB || chainId === ChainId.RH) {
+    return resolveEvmGmgnDirectQuoteToken(chainId, tokenInfo);
   }
   const raw = normalizeToken(chainId, tokenInfo.quote_token_address);
   if (raw && !isTerminalQuote(chainId, raw)) return raw;
@@ -132,10 +114,14 @@ function isPonsPlatformName(platform: string): boolean {
   return platform === 'pons' || platform.startsWith('pons_');
 }
 
-function isInnerLaunchpad(chainId: number, tokenInfo: TokenInfo, platform: string): boolean {
+function isGeniusPlatformName(platform: string): boolean {
+  return platform === 'geniusfun' || platform === 'genius' || platform === 'genius.fun' || platform === 'genius_fun';
+}
+
+export function isInnerLaunchpad(chainId: number, tokenInfo: TokenInfo, platform: string): boolean {
   if (isO1LaunchpadPlatform(platform) || isLongLaunchpadPlatform(platform)) return false;
   if (platform.startsWith('flap')) return classifyFlapRoute(chainId, tokenInfo).isInner;
-  if (isPonsPlatformName(platform)) return tokenInfo.launchpad_status !== 1;
+  if (isPonsPlatformName(platform) || isGeniusPlatformName(platform)) return tokenInfo.launchpad_status !== 1;
   if (FOUR_MEME_PLATFORMS.has(platform) || OPEN_FOUR_PLATFORMS.has(platform)) {
     return tokenInfo.launchpad_status !== 1;
   }
@@ -153,18 +139,24 @@ function dexTypeLooksV3(tokenInfo: TokenInfo): boolean {
 
 function lastHopDex(chainId: number, platform: string, inner: boolean, tokenInfo: TokenInfo): string {
   if (!inner) {
+    const infinityPoolId = /^0x[a-fA-F0-9]{64}$/.test(String(
+      tokenInfo.biggest_pool_address || tokenInfo.pool_pair || tokenInfo.tpool_pool_address || '',
+    ).trim());
     const rhV4Pool = chainId === ChainId.RH && (
       isRhV4PoolId(tokenInfo.biggest_pool_address)
       || isRhV4PoolId(tokenInfo.tpool_pool_address)
       || isRhV4PoolId(tokenInfo.pool_pair)
     );
     // o1 / long.xyz launch as Uniswap v4 pools. Pons v2 outer also graduates to v4.
+    // Genius outer / BSC Infinity biggest_pool is a bytes32 poolId.
     if (
       isO1LaunchpadPlatform(platform)
       || isLongLaunchpadPlatform(platform)
       || rhV4Pool
+      || (chainId === ChainId.BNB && infinityPoolId)
       || platform === 'pons_v2'
       || (isPonsPlatformName(platform) && platform !== 'pons_v1')
+      || isGeniusPlatformName(platform)
       || dexTypeLooksV4(tokenInfo)
     ) {
       return 'V4';
@@ -173,6 +165,7 @@ function lastHopDex(chainId: number, platform: string, inner: boolean, tokenInfo
     return chainId === ChainId.RH ? 'V3' : 'V2';
   }
   if (isPonsPlatformName(platform)) return 'pons';
+  if (isGeniusPlatformName(platform)) return 'Genius';
   if (FOUR_MEME_PLATFORMS.has(platform)) return 'four.meme';
   if (OPEN_FOUR_PLATFORMS.has(platform)) return 'OpenFour';
   if (platform.startsWith('flap')) return 'Flap';
@@ -190,8 +183,8 @@ function lastHopFee(platform: string, inner: boolean): number | null {
 
 function lastHopPool(chainId: number, tokenInfo: TokenInfo, platform: string, inner: boolean): string | null {
   if (inner) {
-    if (isPonsPlatformName(platform)) {
-      const pool = String(tokenInfo.pool_pair || '').trim();
+    if (isPonsPlatformName(platform) || isGeniusPlatformName(platform)) {
+      const pool = String(tokenInfo.pool_pair || tokenInfo.biggest_pool_address || '').trim();
       return isAddress(pool) ? pool : null;
     }
     const contracts = DeployAddress[chainId as ChainId] || {};
@@ -204,8 +197,16 @@ function lastHopPool(chainId: number, tokenInfo: TokenInfo, platform: string, in
     if (OPEN_FOUR_PLATFORMS.has(platform)) return OpenFourInnerLaunchpadManager;
     return null;
   }
+  if (isGeniusPlatformName(platform)) {
+    // Outer Genius uses Pancake Infinity; GMGN pool ids are not pair addresses.
+    return null;
+  }
   const pool = String(tokenInfo.pool_pair || tokenInfo.biggest_pool_address || tokenInfo.tpool_pool_address || '').trim();
   if (isPoolRef(pool)) {
+    // bytes32 Infinity/V4 poolIds are not pair contract addresses.
+    if (/^0x[a-fA-F0-9]{64}$/.test(pool)) {
+      return chainId === ChainId.RH ? pool : null;
+    }
     const contracts = DeployAddress[chainId as ChainId] || {};
     const flapManager = contracts[ContractNames.FlapshTokenManager]?.address?.toLowerCase();
     if (!flapManager || pool.toLowerCase() !== flapManager) return pool;

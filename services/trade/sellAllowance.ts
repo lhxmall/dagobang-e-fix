@@ -72,7 +72,7 @@ export function getSellQuotePullbackTokens(input: {
 
   // Inner four.meme / any inner launchpad with a declared non-terminal quote:
   // router may pull that quote back after the launchpad hop.
-  if (isInner && (platform.includes('four') || platform.startsWith('flap') || platform.includes('openfour'))) {
+  if (isInner && (platform.includes('four') || platform.startsWith('flap') || platform.includes('openfour') || platform.includes('genius'))) {
     push(input.tokenInfo.quote_token_address);
   }
 

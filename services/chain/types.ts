@@ -89,7 +89,7 @@ export interface WalletAdapter {
 }
 
 export interface TradeExecutor {
-  prewarmTurbo(input: TradeTurboPrewarmInput): Promise<QuickTradeRoutePreview | null>;
+  prewarmTurbo(input: TradeTurboPrewarmInput): Promise<import('@/types/extention').TradeTurboPrewarmResult | null>;
   previewQuickTradeRoute(input: TradePreviewRouteInput): Promise<QuickTradeRoutePreview | null>;
   refreshNonce(input: {
     chainId: number;

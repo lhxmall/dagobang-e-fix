@@ -1,8 +1,8 @@
-import { concat, decodeAbiParameters, decodeEventLog, encodeAbiParameters, encodeFunctionData, erc20Abi, formatUnits, isAddress, keccak256, pad, parseAbi, parseAbiItem, parseAbiParameters, toHex } from 'viem';
+import { concat, decodeAbiParameters, decodeEventLog, encodeAbiParameters, encodeFunctionData, erc20Abi, formatUnits, isAddress, keccak256, pad, parseAbi, parseAbiParameters, toHex } from 'viem';
 import { RpcService } from '../rpc';
 import { WalletService } from '../wallet';
 import { SettingsService } from '../settings';
-import type { GasPreset, QuickTradeRouteHop, QuickTradeRoutePreview, SubmitChannel, TxBuyInput, TxSellInput } from '../../types/extention';
+import type { GasPreset, QuickTradeRouteHop, QuickTradeRoutePreview, SubmitChannel, TxBuyInput, TxSellInput, GmgnQuoteLineageEntry } from '../../types/extention';
 import type { FlapTokenStateV7, TokenInfo } from '../../types/token';
 import { ContractNames } from '../../constants/contracts/names';
 import { DeployAddress } from '../../constants/contracts/address';
@@ -11,7 +11,7 @@ import { allTokens, getBridgeTokenAddresses, getBridgeTokenDexPreference } from 
 import { USDC, USDT } from '../../constants/tokens/chains/common';
 import { bscTokens } from '../../constants/tokens/chains/bsc';
 import { dagobangAbi, pairV2Abi, poolV3Abi } from '@/constants/contracts/abi';
-import { Address, DexExactInQuote, HyperSwapType, RhSwapType, SwapDescLike, SwapType, ZERO_ADDRESS, applySlippage, getDeadline, getRouterSwapDesc, getSlippageBps, getV3FeeForDesc, toHyperDexSwapType, toRhDexSwapType } from './tradeTypes';
+import { Address, DexExactInQuote, Hex, HyperSwapType, RhSwapType, SwapDescLike, SwapType, ZERO_ADDRESS, ZERO32, applySlippage, getDeadline, getRouterSwapDesc, getSlippageBps, getV3FeeForDesc, toHyperDexSwapType, toRhDexSwapType } from './tradeTypes';
 import { assertDexQuoteOk, getBridgeToken, quoteBestExactIn as quoteBestExactInDex, resolveBridgeHopExactIn, resolveDexExactIn } from './tradeDex';
 import { getGasPriceWei, prewarmNonce, sendTransaction } from './tradeTx';
 import { getSellSpenders, hasInsufficientSellAllowance, getSellQuotePullbackTokens, type SellAllowanceCheckResult } from './sellAllowance';
@@ -37,8 +37,27 @@ import {
   quotePonsBuy,
   quotePonsSell,
 } from './tradePons';
+import {
+  applyGeniusBuySlippage,
+  buildGeniusBuyDesc,
+  buildGeniusSellDesc,
+  getGeniusTradeState,
+  isGeniusPlatform,
+  quoteGeniusBuyDetailed,
+  quoteGeniusSell,
+} from './tradeGenius';
+import {
+  buildPancakeInfinityExactInDesc,
+  extractPancakeInfinityPoolId,
+  peekCachedPancakeInfinityPoolKey,
+  infinityPoolQuoteRouterToken,
+  isPancakeInfinityPoolId,
+  quotePancakeInfinityExactIn,
+  readPancakeInfinityPoolKey,
+  resolveBnbInfinityRouteFromTokenInfo,
+} from './tradePancakeInfinity';
 import { formatBroadcastProvider } from '@/utils/format';
-import { getDexPoolPrefer, parseGweiToWei } from '@/utils/dexUtils';
+import { getDexPoolPrefer, isPancakeInfinityDexText, parseGweiToWei } from '@/utils/dexUtils';
 import { classifyBroadcastError, collectErrorText, getNonceErrorKindFromText, isAllowanceLikeText, isInFlightLimitLikeText } from '@/utils/txErrorClassify';
 import { tryGetReceiptRevertReason } from '@/services/tx/errors';
 import { getNativeSymbol } from '@/constants/chains';
@@ -66,17 +85,15 @@ const UNISWAP_V4_POOLS_SLOT = 6n;
 const RH_DOPPLER_HOOK = '0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544' as Address;
 /** Common RH Uniswap v4 hook (e.g. STANDARD / meme V4 pools). */
 const RH_STANDARD_V4_HOOK = '0xf1Ee073811b14359d850825E48d200483200EdCd' as Address;
-const uniswapV4InitializeEvent = parseAbiItem(
-  'event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)',
-);
 import { GmgnAPI } from '@/hooks/GmgnAPI';
-import { classifyFlapRoute, hasConfirmedFlapLaunchpadIdentity, hasConfirmedFlapOuterRoute, isUsableFlapDexPoolAddress, resolveFlapPlatform, resolveFlapPlatformByQuoteLineage } from '@/utils/flap';
+import { classifyFlapRoute, hasConfirmedFlapLaunchpadIdentity, hasConfirmedFlapOuterRoute, hasConfirmedFlapStocksIdentity, hasNonTerminalFlapOuterQuote, isUsableFlapDexPoolAddress, resolveFlapPlatform, resolveFlapPlatformByQuoteLineage } from '@/utils/flap';
 import { resolveTokenLaunchpadPlatform } from '@/utils/launchpadFamily';
 import { planEvmTradeRoute, resolveEvmTradeQuoteToken, type EvmTradeRoutePlan, type EvmTradeRoutePlanHop } from '@/utils/quickTradeRoutePreview';
 import { resolveQuoteFromDexScreenerPool } from '@/utils/officialPoolQuote';
 import { getTradeRouteStableAddresses, isTradeRouteNativeToken, isTradeRouteTerminalQuote } from '@/utils/tradeRouteTerminals';
 import {
   clearOuterMarketRouteInFlight,
+  evictOuterMarketRoute,
   getOuterMarketRouteInFlight,
   setOuterMarketRoute,
   setOuterMarketRouteInFlight,
@@ -85,6 +102,13 @@ import {
 import { preferRouteTokenSymbol, resolveRouteTokenLabel, getKnownQuoteTokenSymbol } from '@/utils/quoteTokenLabels';
 import { TokenFlapService } from '@/services/token/flap';
 import { call } from '@/utils/messaging';
+import type { LimitOrderSwapDesc } from '@/types/extention';
+import { shouldWalkGmgnQuoteLineage } from '@/utils/gmgnQuoteLineage';
+import {
+  isEvmInnerLaunchpadToken,
+  resolveEvmGmgnDirectQuoteToken,
+  supportsGmgnMutilWindowLineageChain,
+} from '@/utils/bscTradeRoutePolicy';
 
 function getDefaultBridgeV3Fee(chainId: number): number {
   if (chainId === ChainId.HYPER) return 3000;
@@ -114,6 +138,7 @@ const INNER_LAUNCHPAD_PLATFORMS = new Set([
   'pons',
   'pons_v1',
   'pons_v2',
+  'geniusfun',
 ]);
 
 const FOUR_MEME_PLATFORMS = new Set([
@@ -201,6 +226,7 @@ type LaunchpadRouteClassification = {
   platform: string;
   isHyperAltfun: boolean;
   isPons: boolean;
+  isGenius: boolean;
   isFlap: boolean;
   isFlapStocks: boolean;
   isInner: boolean;
@@ -210,6 +236,7 @@ type LaunchpadRouteClassification = {
 
 const DEFAULT_SWAP_GAS_LIMIT = 2000000n;
 const OPEN_FOUR_SWAP_GAS_LIMIT = 2500000n;
+const GENIUS_SWAP_GAS_LIMIT = 2500000n;
 
 function resolveLaunchpadPlatform(platform: string | undefined): string {
   return normalizeLaunchpadPlatform(platform) ?? String(platform || '').trim().toLowerCase();
@@ -279,6 +306,7 @@ function getOpenFourQuoteRouterToken(chainId: number, runtimeState?: OpenFourRun
 
 function getSwapGasLimitForLaunchpad(platform: string, isInner: boolean): bigint {
   if (isInner && usesOpenFourRuntime(platform)) return OPEN_FOUR_SWAP_GAS_LIMIT;
+  if (isGeniusPlatform(platform)) return GENIUS_SWAP_GAS_LIMIT;
   return DEFAULT_SWAP_GAS_LIMIT;
 }
 
@@ -328,15 +356,16 @@ export class TradeService {
   private static readonly flapPoolCounterpartyInFlight = new Map<string, Promise<Address | null>>();
   private static readonly officialLaunchpadQuoteCache = new Map<string, { ts: number; value: Address | null }>();
   private static readonly officialLaunchpadQuoteInFlight = new Map<string, Promise<Address | null>>();
+  private static readonly declaredQuoteLineageCache = new Map<string, { ts: number; value: Address | null }>();
+  private static readonly declaredQuoteLineageInFlight = new Map<string, Promise<Address | null>>();
+  private static readonly gmgnQuoteLineageCache = new Map<string, { ts: number; value: Array<{ token: Address; quote: Address; poolAddress: Address; preferHint: 'v2' | 'v3' | 'v4' | null }> | null }>();
+  private static readonly gmgnQuoteLineageInFlight = new Map<string, Promise<Array<{ token: Address; quote: Address; poolAddress: Address; preferHint: 'v2' | 'v3' | 'v4' | null }> | null>>();
   private static readonly preparedEvmTradeRouteCacheMs = 30_000;
   private static readonly preparedEvmTradeRouteCache = new Map<string, { ts: number; value: PreparedEvmTradeRoute | null }>();
   private static readonly preparedEvmTradeRouteInFlight = new Map<string, Promise<PreparedEvmTradeRoute | null>>();
   private static readonly rhV4PoolKeyCache = new Map<string, Promise<{ fee: number; tickSpacing: number; hooks: Address } | null>>();
   /** Runtime lpFee (or static display fee) keyed by poolId — preview only, never overwrite PoolKey.fee. */
   private static readonly rhV4DisplayFeeByPoolId = new Map<string, number>();
-  /** Authoritative PoolKey from Initialize(poolId) — permanent once found. */
-  private static readonly rhV4InitializeKeyCache = new Map<string, { fee: number; tickSpacing: number; hooks: Address } | null>();
-  private static readonly rhV4InitializeKeyInFlight = new Map<string, Promise<{ fee: number; tickSpacing: number; hooks: Address } | null>>();
 
   private static makeApproveKey(chainId: number, owner: string, token: string, spender: string) {
     return `${chainId}:${owner.toLowerCase()}:${token.toLowerCase()}:${spender.toLowerCase()}`;
@@ -474,14 +503,25 @@ export class TradeService {
     return resolved;
   }
 
-  static async prewarmTurbo(input: { chainId: number; tokenAddress: Address; tokenInfo?: TokenInfo; fromAddress?: `0x${string}`; submitChannel?: SubmitChannel; baseTokenAddress?: Address }): Promise<QuickTradeRoutePreview | null> {
+  static async prewarmTurbo(input: { chainId: number; tokenAddress: Address; tokenInfo?: TokenInfo; fromAddress?: `0x${string}`; submitChannel?: SubmitChannel; baseTokenAddress?: Address; gmgnQuoteLineage?: GmgnQuoteLineageEntry[]; prepareBudgetMs?: number }): Promise<import('@/types/extention').TradeTurboPrewarmResult | null> {
     const settings = await SettingsService.get();
     const consoleLogsEnabled = settings.ui?.consoleLogsEnabled === true;
     const startedAt = Date.now();
     let tokenInfo = input.tokenInfo;
     if (!tokenInfo) return null;
+    tokenInfo = await this.ensureMutilWindowTradeTokenInfo(input.chainId, tokenInfo, consoleLogsEnabled);
     tokenInfo = await this.ensureFlapTradeTokenInfo(input.chainId, tokenInfo, consoleLogsEnabled);
     input.tokenInfo = tokenInfo;
+
+    // Pre-populate the GMGN quote-lineage cache from the page-resolved lineage so
+    // the background never fetches GMGN directly (CORS/cookie-timeout in the SW).
+    // The page walks token→quote→…→terminal in the main world and passes the full
+    // lineage here; we cache the suffix starting at each token so the recursive
+    // buildOuterMarketBuyQuoteRoute calls (e.g. BNB→BNCB, BNB→BNC4) hit the cache
+    // for every quote token in the chain, not just the top token.
+    if (input.gmgnQuoteLineage?.length) {
+      this.populateGmgnQuoteLineageCache(input.chainId, input.gmgnQuoteLineage);
+    }
 
     const configuredBaseToken = this.resolveConfiguredBaseTokenAddress(input.chainId, settings);
     const baseTokenAddress = (input.baseTokenAddress && isAddressLike(input.baseTokenAddress)
@@ -492,6 +532,10 @@ export class TradeService {
       tokenAddress: input.tokenAddress,
       tokenInfo,
       baseTokenAddress,
+      // BSC multi-hop (GMGN lineage + Genius Infinity) routinely exceeds 2.5s.
+      prepareBudgetMs: typeof input.prepareBudgetMs === 'number'
+        ? input.prepareBudgetMs
+        : (input.chainId === ChainId.BNB || input.chainId === ChainId.RH ? 0 : undefined),
     }).catch(() => null);
 
     void this.warmTurboWalletState({
@@ -507,7 +551,114 @@ export class TradeService {
     });
 
     const prepared = await routeTask;
-    return prepared?.preview ?? null;
+    if (!prepared?.preview || !prepared.descs.length) return null;
+    return {
+      preview: prepared.preview,
+      routeDescs: prepared.descs as import('@/types/extention').LimitOrderSwapDesc[],
+    };
+  }
+
+  /**
+   * Same route prewarm pipeline as the trade panel (App.tsx prewarmTurbo):
+   * shouldWalkGmgnQuoteLineage → optional GMGN walk → prewarmTurbo → prepareEvmTradeRoute.
+   * Limit orders, scanners, and manual trades must all use this — no separate routing policy.
+   */
+  static async prewarmTradeRouteForToken(input: {
+    chainId: number;
+    tokenAddress: Address;
+    tokenInfo: TokenInfo;
+    baseTokenAddress?: Address;
+    fromAddress?: `0x${string}`;
+    prepareBudgetMs?: number;
+    gmgnQuoteLineageHint?: GmgnQuoteLineageEntry[];
+    fetchGmgnLineage?: () => Promise<GmgnQuoteLineageEntry[] | null>;
+  }): Promise<QuickTradeRoutePreview | null> {
+    let gmgnQuoteLineage: GmgnQuoteLineageEntry[] | undefined;
+    if (shouldWalkGmgnQuoteLineage(input.chainId, input.tokenInfo)) {
+      const walked = input.fetchGmgnLineage
+        ? await input.fetchGmgnLineage().catch(() => null)
+        : null;
+      gmgnQuoteLineage = walked?.length ? walked : input.gmgnQuoteLineageHint;
+    }
+    const warmed = await this.prewarmTurbo({
+      chainId: input.chainId,
+      tokenAddress: input.tokenAddress,
+      tokenInfo: input.tokenInfo,
+      baseTokenAddress: input.baseTokenAddress,
+      fromAddress: input.fromAddress,
+      gmgnQuoteLineage,
+      prepareBudgetMs: input.prepareBudgetMs,
+    });
+    return warmed?.preview ?? null;
+  }
+
+  /** Build route topology — same pipeline as manual trade, for persisting on limit orders. */
+  static async resolveTradeRouteTopology(input: {
+    chainId: number;
+    tokenAddress: Address;
+    tokenInfo: TokenInfo;
+    baseTokenAddress?: Address;
+    gmgnQuoteLineageHint?: GmgnQuoteLineageEntry[];
+    fetchGmgnLineage?: () => Promise<GmgnQuoteLineageEntry[] | null>;
+    prepareBudgetMs?: number;
+  }): Promise<PreparedEvmTradeRoute | null> {
+    const prepareBudgetMs = typeof input.prepareBudgetMs === 'number'
+      ? input.prepareBudgetMs
+      : 15_000;
+    await this.prewarmTradeRouteForToken({
+      ...input,
+      prepareBudgetMs,
+    });
+    return this.prepareEvmTradeRoute({
+      chainId: input.chainId,
+      tokenAddress: input.tokenAddress,
+      tokenInfo: input.tokenInfo,
+      baseTokenAddress: input.baseTokenAddress,
+      prepareBudgetMs,
+    });
+  }
+
+  private static resolveStoredPreparedRoute(
+    storedDescs: LimitOrderSwapDesc[] | undefined,
+    tokenAddress: Address,
+  ): PreparedEvmTradeRoute | null {
+    if (!storedDescs?.length) return null;
+    const descs = this.cloneSwapDescLikeArray(storedDescs as SwapDescLike[]) ?? [];
+    if (!descs.length) return null;
+    const last = descs[descs.length - 1];
+    if (last.tokenOut.toLowerCase() !== tokenAddress.toLowerCase()) {
+      throw new Error('挂单路由与代币不匹配，等待路由刷新');
+    }
+    return {
+      descs,
+      preview: { buyLabel: '', sellLabel: '', hops: [] },
+    };
+  }
+
+  /** Buy/sell execution uses the same prepareEvmTradeRoute output as the UI preview. */
+  private static async resolveBuyPreparedRoute(input: {
+    chainId: number;
+    tokenAddress: Address;
+    tokenInfo: TokenInfo;
+    baseTokenAddress: Address;
+    storedDescs?: LimitOrderSwapDesc[];
+    prepareBudgetMs?: number;
+  }): Promise<PreparedEvmTradeRoute | null> {
+    const tokenOut = input.tokenAddress;
+    const stored = this.resolveStoredPreparedRoute(input.storedDescs, tokenOut);
+    // Prewarm / UI / limit-order snapshots win — execution must not rebuild topology at click time.
+    if (stored?.descs.length && this.isValidPreparedExecutionRoute(input.chainId, stored.descs, tokenOut)) {
+      return stored;
+    }
+    const fresh = await this.prepareEvmTradeRoute({
+      chainId: input.chainId,
+      tokenAddress: tokenOut,
+      tokenInfo: input.tokenInfo,
+      baseTokenAddress: input.baseTokenAddress,
+      prepareBudgetMs: input.prepareBudgetMs ?? 15_000,
+    });
+    if (fresh?.descs.length) return fresh;
+    return stored;
   }
 
   private static warmTurboWalletState(input: {
@@ -553,6 +704,18 @@ export class TradeService {
       ];
       const backgroundWarmTasks: Array<Promise<unknown>> = [];
 
+        // prepareEvmTradeRoute is the single route source — it already resolves
+        // every pool the trade will use. Only fall back to the legacy independent
+        // pool warming when it produced nothing; otherwise that warming would
+        // re-resolve pools (possibly to different ones) and fire redundant RPCs
+        // (e.g. Genius bytes32 poolIds have no V2/V3 pair to warm).
+        const preparedWarm = await input.routeTask;
+        const skipLegacyWarm = this.shouldSkipLegacyFlapPrewarmWarm(input.chainId, tokenInfo)
+          || (
+            supportsGmgnMutilWindowLineageChain(input.chainId)
+            && !isEvmInnerLaunchpadToken(input.chainId, tokenInfo)
+          );
+        if (!preparedWarm?.descs.length && !skipLegacyWarm) {
         const token = input.tokenAddress;
         const launchpadRoute = this.classifyLaunchpadRoute(input.chainId, tokenInfo);
         const launchpadPlatform = launchpadRoute.platform;
@@ -636,7 +799,7 @@ export class TradeService {
       }
 
       if (needsNonTerminalQuoteRoute && rawQuoteToken) {
-        const quoteTopologyTask = this.resolveFlapStocksQuoteTopology({
+        const quoteTopologyTask = this.resolveOuterQuoteTopology({
           chainId: input.chainId,
           rawQuoteToken,
           anchorToken: token,
@@ -668,6 +831,7 @@ export class TradeService {
           }).catch(() => null)
         );
       }
+        }
 
       await Promise.allSettled(criticalWarmTasks);
       if (backgroundWarmTasks.length > 0) {
@@ -694,14 +858,12 @@ export class TradeService {
           warmTaskCount: criticalWarmTasks.length + backgroundWarmTasks.length,
           criticalWarmTaskCount: criticalWarmTasks.length,
           backgroundWarmTaskCount: backgroundWarmTasks.length,
-          hasBridgeToken: !!bridgeToken,
-          tokenPrefer,
+          hasPreparedRoute: !!preparedWarm?.descs.length,
           elapsedMs,
           warmKey,
         });
       }
-      const prepared = await input.routeTask;
-      return prepared?.preview ?? null;
+      return preparedWarm?.preview ?? null;
     })().finally(() => {
       const current = this.turboPrewarmInFlight.get(warmKey);
       if (current === task) this.turboPrewarmInFlight.delete(warmKey);
@@ -804,7 +966,7 @@ export class TradeService {
     const walletAddress = this.resolveOptionalEvmAddress(input.walletAddress, 'wallet address');
     if (!walletAddress) return null;
     const tokenAddress = this.resolveEvmAddress(input.tokenAddress, 'token address').toLowerCase();
-    let totalOutWei = 0n;
+    const inbound: bigint[] = [];
     for (const log of Array.isArray(input.receipt?.logs) ? input.receipt.logs : []) {
       if (String(log?.address || '').toLowerCase() !== tokenAddress) continue;
       try {
@@ -817,11 +979,27 @@ export class TradeService {
         const to = String((decoded as any)?.args?.to || '').toLowerCase();
         if (to !== walletAddress.toLowerCase()) continue;
         const value = BigInt((decoded as any)?.args?.value ?? 0);
-        if (value > 0n) totalOutWei += value;
+        if (value > 0n) inbound.push(value);
       } catch {
       }
     }
-    return totalOutWei > 0n ? totalOutWei.toString() : null;
+    if (!inbound.length) return null;
+    // Multi-transfer receipts (fee/reflection/airdrop) must not sum — that
+    // overstates tokens received, deflates entry price, and places take-profit
+    // triggers below spot (instant sell cascade).
+    const resolved = inbound.length === 1
+      ? inbound[0]
+      : inbound.reduce((best, value) => (value > best ? value : best), 0n);
+    if (inbound.length > 1) {
+      console.warn('[trade.buy.receipt.multi_transfer]', {
+        tokenAddress,
+        walletAddress,
+        transferCount: inbound.length,
+        inboundWei: inbound.map((v) => v.toString()),
+        resolvedWei: resolved.toString(),
+      });
+    }
+    return resolved > 0n ? resolved.toString() : null;
   }
 
   private static async repairSellAllowanceIfNeeded(input: {
@@ -955,6 +1133,7 @@ export class TradeService {
     const rawPlatform = resolveTradeLaunchpadPlatform(tokenInfo);
     const isHyperAltfun = chainId === ChainId.HYPER && isHyperAltfunPlatform(rawPlatform);
     const isPons = isPonsPlatform(rawPlatform);
+    const isGenius = chainId === ChainId.BNB && isGeniusPlatform(rawPlatform);
     const isFlap = rawPlatform.startsWith('flap');
     const flapRoute = isFlap ? classifyFlapRoute(chainId, tokenInfo) : null;
     const isFlapStocks = !!flapRoute?.isFlapStocks;
@@ -965,7 +1144,7 @@ export class TradeService {
     const isLong = isLongLaunchpadPlatform(rawPlatform);
     const isInner = isHyperAltfun || isO1 || isLong
       ? false
-      : isPons
+      : isPons || isGenius
         ? tokenInfo.launchpad_status !== 1
       : usesOpenFourRuntime(platform)
         ? openFourRuntime
@@ -979,6 +1158,7 @@ export class TradeService {
       platform,
       isHyperAltfun,
       isPons,
+      isGenius,
       isFlap,
       isFlapStocks,
       isInner,
@@ -1148,6 +1328,16 @@ export class TradeService {
         manager: openFourRouteAddress,
       };
     }
+    if (isGeniusPlatform(platform) && tokenInfo.launchpad_status !== 1) {
+      const curveCandidate = routeAddress !== ZERO_ADDRESS
+        ? routeAddress
+        : (isAddressLike(tokenInfo.biggest_pool_address) ? tokenInfo.biggest_pool_address as Address : ZERO_ADDRESS);
+      return {
+        buyType: SwapType.GENIUS_BUY,
+        sellType: SwapType.GENIUS_SELL,
+        manager: curveCandidate,
+      };
+    }
     return null;
   }
 
@@ -1220,8 +1410,18 @@ export class TradeService {
     debug?: boolean;
   }): Promise<Address | null> {
     const plannedQuote = resolveEvmTradeQuoteToken(input.chainId, input.tokenInfo);
+    if (plannedQuote && supportsGmgnMutilWindowLineageChain(input.chainId)) {
+      this.logTradeRouteDebug(input.debug, 'route.quote.planned', {
+        chainId: input.chainId,
+        tokenAddress: input.tokenAddress,
+        platform: input.platform,
+        plannedQuote,
+        source: 'mutil_window',
+      });
+      return plannedQuote;
+    }
     if (plannedQuote && this.isNonTerminalQuoteToken(input.chainId, plannedQuote, input.tokenAddress)) {
-      this.logFlapStocksRoute(input.debug, 'route.quote.planned', {
+      this.logTradeRouteDebug(input.debug, 'route.quote.planned', {
         chainId: input.chainId,
         tokenAddress: input.tokenAddress,
         platform: input.platform,
@@ -1239,8 +1439,11 @@ export class TradeService {
       input.openFourRuntime,
       { preferRuntimeQuote: false },
     );
-    const shouldReadFlapOfficial = input.platform.startsWith('flap')
-      || hasConfirmedFlapLaunchpadIdentity(input.chainId, input.tokenInfo);
+    // Outer GMGN tokens never use on-chain Flap official quote — mutil_window only.
+    const shouldReadFlapOfficial = input.isInner && (
+      input.platform.startsWith('flap')
+      || hasConfirmedFlapLaunchpadIdentity(input.chainId, input.tokenInfo)
+    );
     const officialQuote = shouldReadFlapOfficial
       ? await this.resolveOfficialLaunchpadQuote(input.chainId, input.tokenAddress, input.debug)
       : null;
@@ -1352,6 +1555,315 @@ export class TradeService {
 
     this.officialLaunchpadQuoteInFlight.set(key, task);
     return await task;
+  }
+
+  /**
+   * Resolve the metadata-declared quote token for a target whose raw
+   * quote_token_address is itself a non-terminal token (e.g. BNCB → BNC4,
+   * GSTOCK → BNCB, ABS → BNCB). Used by buildOuterMarketBuyQuoteRoute to drive
+   * quote-lineage recursion before falling back to dexHome's deepest pool.
+   *
+   * Uses the RAW quote_token_address directly (NOT resolveEvmTradeQuoteToken,
+   * which applies a BNC4 template fallback for 4Stock tokens and would wrongly
+   * route GMEB — whose real quote is USDT — through BNC4). Returns null when the
+   * raw quote is terminal (USDT/USDC/BNB), absent, or equal to the target, so
+   * terminal-quoted 4Stock tokens (GMEB) fall through to catalog_stable_home /
+   * dexHome as before. Cached per (chain,token) to avoid repeated GMGN fetches.
+   */
+  private static async resolveDeclaredQuoteLineageQuote(
+    chainId: number,
+    tokenAddress: Address,
+    debug?: boolean,
+  ): Promise<Address | null> {
+    if (chainId !== ChainId.BNB) return null;
+    if (this.isFlapOuterRouteTerminalToken(chainId, tokenAddress)) return null;
+    const key = `${chainId}:${tokenAddress.toLowerCase()}`;
+    const cached = this.declaredQuoteLineageCache.get(key);
+    if (cached && Date.now() - cached.ts < OFFICIAL_LAUNCHPAD_QUOTE_CACHE_MS) return cached.value;
+    const inflight = this.declaredQuoteLineageInFlight.get(key);
+    if (inflight) return await inflight;
+
+    const task = (async () => {
+      const tokenInfo = await this.resolveTokenInfoForOuterMarket(chainId, tokenAddress);
+      if (!tokenInfo) return null;
+      // resolveEvmTradeQuoteToken applies the BNC4 template fallback for
+      // BNC-prefixed 4Stock tokens (e.g. BNCB → BNC4) EVEN when
+      // tokenInfo.quote_token_address is empty — which is exactly why visiting
+      // BNCB's own page yields the correct BNB→USDT→BNC4→BNCB route. Non-BNC
+      // catalog quotes (GMEB → USDT) return their real terminal quote, which
+      // the isNonTerminalQuoteToken check below rejects, so they fall through
+      // to dexHome unchanged.
+      const declared = resolveEvmTradeQuoteToken(chainId, tokenInfo) as Address | null;
+      if (!declared || this.isEquivalentFlapRouteToken(chainId, declared, tokenAddress)) return null;
+      // Only recurse when the declared quote is itself non-terminal. Terminal
+      // quotes (USDT/USDC) belong to catalog_stable_home / dexHome.
+      if (!this.isNonTerminalQuoteToken(chainId, declared, tokenAddress)) return null;
+      this.logFlapStocksRoute(debug, 'declared.quote.resolved', {
+        chainId,
+        tokenAddress,
+        declaredQuote: declared,
+        quoteTokenAddress: tokenInfo.quote_token_address ?? null,
+      });
+      return declared;
+    })()
+      .then((value) => {
+        this.declaredQuoteLineageCache.set(key, { ts: Date.now(), value });
+        return value;
+      })
+      .finally(() => {
+        this.declaredQuoteLineageInFlight.delete(key);
+      });
+
+    this.declaredQuoteLineageInFlight.set(key, task);
+    return await task;
+  }
+
+  /**
+   * Walk the quote lineage of a target token using the GMGN
+   * /mutil_window_token_info batch endpoint, which returns the AUTHORITATIVE
+   * biggest-pool quote_address + pool_address for each token. This is the
+   * root-cause data source for multi-hop quote routing — no resolveEvmTradeQuoteToken
+   * BNC4-fallback heuristic, no dexHome deepest-pool guessing.
+   *
+   * Returns the lineage from the token down to its terminal quote, e.g. for ABS:
+   *   [{ token: ABS, quote: BNCB, pool: 0xe336… }, { token: BNCB, quote: BNC4, pool: 0xcf93… },
+   *    { token: BNC4, quote: USDT, pool: 0x… }]
+   * The last entry's quote is terminal (USDT/USDC/BNB), so the lineage is complete.
+   *
+   * CACHE-ONLY in the background: the GMGN endpoint cannot be fetched from the
+   * service worker (CORS + GMGN auth cookies only live in the page main world),
+   * so the lineage MUST be pre-resolved by the content script
+   * (resolveGmgnQuoteLineageViaPage) and passed to prewarmTurbo, which calls
+   * populateGmgnQuoteLineageCache to seed this cache for every token in the
+   * chain. If the cache is cold (e.g. a non-prewarm caller), this returns null
+   * and the caller falls back to declared/dexHome — it never blocks on a fetch.
+   */
+  private static async resolveGmgnQuoteLineage(
+    chainId: number,
+    tokenAddress: Address,
+    debug?: boolean,
+  ): Promise<Array<{ token: Address; quote: Address; poolAddress: Address; preferHint: 'v2' | 'v3' | 'v4' | null }> | null> {
+    if (!supportsGmgnMutilWindowLineageChain(chainId)) return null;
+    const key = `${chainId}:${tokenAddress.toLowerCase()}`;
+    const cached = this.gmgnQuoteLineageCache.get(key);
+    if (cached && Date.now() - cached.ts < OFFICIAL_LAUNCHPAD_QUOTE_CACHE_MS) return cached.value;
+    this.logFlapStocksRoute(debug, 'gmgn.lineage.cold', { chainId, tokenAddress });
+    return null;
+  }
+
+  /** When the quote token's cache is cold, slice the root token's seeded lineage. */
+  private static async resolveGmgnQuoteLineageForTarget(
+    chainId: number,
+    targetToken: Address,
+    lineageRootToken?: Address,
+    debug?: boolean,
+  ): Promise<Array<{ token: Address; quote: Address; poolAddress: Address; preferHint: 'v2' | 'v3' | 'v4' | null }> | null> {
+    const direct = await this.resolveGmgnQuoteLineage(chainId, targetToken, debug).catch(() => null);
+    if (direct?.length) return direct;
+    const root = String(lineageRootToken || '').trim().toLowerCase();
+    const target = targetToken.toLowerCase();
+    if (!root || root === target) return null;
+    const rootLineage = await this.resolveGmgnQuoteLineage(chainId, lineageRootToken as Address, debug).catch(() => null);
+    if (!rootLineage?.length) return null;
+    const idx = rootLineage.findIndex((entry) => entry.token.toLowerCase() === target);
+    return idx >= 0 ? rootLineage.slice(idx) : null;
+  }
+
+  /**
+   * Seed the GMGN quote-lineage cache from a page-resolved lineage. For each
+   * entry in the lineage, cache the suffix starting at that entry under the
+   * entry's token key, so recursive buildOuterMarketBuyQuoteRoute calls for
+   * every quote token in the chain (e.g. BNB→BNCB, BNB→BNC4) hit the cache
+   * instead of trying to fetch GMGN from the background.
+   */
+  private static populateGmgnQuoteLineageCache(
+    chainId: number,
+    lineage: GmgnQuoteLineageEntry[],
+  ): void {
+    this._populateGmgnQuoteLineageCache(chainId, lineage);
+  }
+
+  /**
+   * Public entry for the limit-order executor (and other background callers)
+   * to re-seed the GMGN quote-lineage cache from a lineage stored on an order.
+   * The background cannot fetch GMGN (CORS), so the lineage must have been
+   * resolved in the page main world at order-creation time and carried on the
+   * order. Seeding here makes the subsequent prepareEvmTradeRoute resolve the
+   * full multi-hop quote lineage (e.g. ABS→BNCB→BNC4→USDT) without any GMGN
+   * fetch.
+   */
+  static seedGmgnQuoteLineageCache(
+    chainId: number,
+    lineage: GmgnQuoteLineageEntry[] | undefined | null,
+  ): void {
+    if (!lineage?.length) return;
+    this._populateGmgnQuoteLineageCache(chainId, lineage);
+  }
+
+  /**
+   * Drop cached GMGN lineage for a token (and optional hop suffixes). Used
+   * when a stored snapshot is stale after inner→outer graduation so the
+   * subsequent prepareEvmTradeRoute cannot reuse a dead pool.
+   */
+  static evictGmgnQuoteLineageCache(
+    chainId: number,
+    tokenOrLineage?: string | GmgnQuoteLineageEntry[] | null,
+  ): void {
+    if (!supportsGmgnMutilWindowLineageChain(chainId) || tokenOrLineage == null) return;
+    const tokens = new Set<string>();
+    if (typeof tokenOrLineage === 'string') {
+      const token = String(tokenOrLineage).trim().toLowerCase();
+      if (token) tokens.add(token);
+    } else {
+      for (const entry of tokenOrLineage) {
+        const token = String(entry?.token || '').trim().toLowerCase();
+        if (token) tokens.add(token);
+      }
+    }
+    for (const token of tokens) {
+      this.gmgnQuoteLineageCache.delete(`${chainId}:${token}`);
+    }
+  }
+
+  private static _populateGmgnQuoteLineageCache(
+    chainId: number,
+    lineage: GmgnQuoteLineageEntry[],
+  ): void {
+    if (!supportsGmgnMutilWindowLineageChain(chainId) || !lineage.length) return;
+    const ts = Date.now();
+    const evicted = new Set<string>();
+    for (let i = 0; i < lineage.length; i++) {
+      const suffix = lineage.slice(i).map((entry) => ({
+        token: entry.token as Address,
+        quote: entry.quote as Address,
+        poolAddress: entry.poolAddress as Address,
+        preferHint: entry.preferHint,
+        poolFactory: entry.poolFactory ?? null,
+        exchange: entry.exchange ?? null,
+      }));
+      const tokenKey = String(lineage[i].token || '').trim().toLowerCase();
+      const key = `${chainId}:${tokenKey}`;
+      this.gmgnQuoteLineageCache.set(key, { ts, value: suffix });
+      if (tokenKey && !evicted.has(tokenKey)) {
+        evicted.add(tokenKey);
+        evictOuterMarketRoute(chainId, tokenKey as Address);
+      }
+    }
+  }
+
+  /**
+   * Build a buy route from a GMGN quote lineage. The lineage is token→quote→…
+   * down to a terminal quote; the route is currentToken→terminal→…→token using
+   * the authoritative pool addresses from GMGN (no DexScreener pool lookup).
+   */
+  /**
+   * Returns undefined when GMGN lineage cache is cold (caller may fall through).
+   * Returns null when lineage is authoritative but hop materialization failed.
+   */
+  private static async tryBuildGmgnLineageOuterBuyRoute(input: {
+    chainId: number;
+    currentToken: Address;
+    targetToken: Address;
+    lineageRootToken?: Address;
+    debug?: boolean;
+  }): Promise<SwapDescLike[] | null | undefined> {
+    if (!supportsGmgnMutilWindowLineageChain(input.chainId)) return undefined;
+    const lineage = await this.resolveGmgnQuoteLineageForTarget(
+      input.chainId,
+      input.targetToken,
+      input.lineageRootToken,
+      input.debug,
+    ).catch(() => null);
+    if (!lineage?.length) return undefined;
+    const gmgnRoute = await this.buildGmgnLineageBuyRoute({
+      chainId: input.chainId,
+      currentToken: input.currentToken,
+      targetToken: input.targetToken,
+      lineage,
+      debug: input.debug,
+    }).catch(() => null);
+    if (gmgnRoute?.length) {
+      this.logRoutePool(input.debug, 'buy.branch', {
+        chainId: input.chainId,
+        currentToken: input.currentToken,
+        targetToken: input.targetToken,
+        branch: 'gmgn_lineage',
+        hops: this.summarizeRouteDescs(gmgnRoute),
+      });
+      return gmgnRoute;
+    }
+    this.logRoutePool(input.debug, 'buy.gmgn.fail', {
+      chainId: input.chainId,
+      currentToken: input.currentToken,
+      targetToken: input.targetToken,
+      lineageLength: lineage.length,
+    });
+    return null;
+  }
+
+  private static async buildGmgnLineageBuyRoute(input: {
+    chainId: number;
+    currentToken: Address;
+    targetToken: Address;
+    lineage: Array<{
+      token: Address;
+      quote: Address;
+      poolAddress: Address;
+      preferHint: 'v2' | 'v3' | 'v4' | null;
+      poolFactory?: string | null;
+      exchange?: string | null;
+    }>;
+    debug?: boolean;
+  }): Promise<SwapDescLike[] | null> {
+    const { chainId, currentToken, targetToken, lineage } = input;
+    if (!lineage.length) return null;
+    const terminalQuote = lineage[lineage.length - 1].quote;
+    if (!isTradeRouteTerminalQuote(chainId, terminalQuote)) return null;
+    const descs: SwapDescLike[] = [];
+    // Bridge from currentToken (e.g. BNB) to the terminal quote (e.g. USDT).
+    if (!this.isEquivalentFlapRouteToken(chainId, currentToken, terminalQuote)) {
+      descs.push(await this.resolveRouteHopDesc({
+        chainId,
+        tokenIn: currentToken,
+        tokenOut: terminalQuote,
+        prefer: getBridgeTokenDexPreference(chainId as ChainId, terminalQuote) ?? null,
+      }));
+    }
+    // Walk the lineage from terminal side back to the target, adding hop quote→token
+    // for each entry using its authoritative GMGN pool address.
+    for (const entry of lineage.slice().reverse()) {
+      if (this.isEquivalentFlapRouteToken(chainId, entry.quote, entry.token)) continue;
+      try {
+        const v3Factory = entry.poolFactory && isAddressLike(entry.poolFactory)
+          ? entry.poolFactory as Address
+          : null;
+        descs.push(await this.resolveKnownPoolRouteDesc({
+          chainId,
+          tokenIn: entry.quote,
+          tokenOut: entry.token,
+          poolAddress: entry.poolAddress,
+          preferHint: entry.preferHint,
+          dexType: entry.exchange ?? null,
+          v3Factory,
+          debug: input.debug,
+        }));
+      } catch {
+        try {
+          descs.push(await this.resolveRouteHopDesc({
+            chainId,
+            tokenIn: entry.quote,
+            tokenOut: entry.token,
+            prefer: entry.preferHint === 'v3' ? 'v3' : entry.preferHint === 'v2' ? 'v2' : null,
+          }));
+        } catch {
+          return null;
+        }
+      }
+    }
+    // Sanity: the final hop must land on the target token.
+    if (!descs.length) return null;
+    if (!this.isEquivalentFlapRouteToken(chainId, descs[descs.length - 1]?.tokenOut, targetToken)) return null;
+    return descs;
   }
 
   private static sanitizeFlapQuoteTokenAddress(tokenAddress: Address, quoteTokenAddress?: string | null): Address | null {
@@ -1487,7 +1999,8 @@ export class TradeService {
     return out;
   }
 
-  private static async resolveFlapStocksQuoteTopology(input: {
+  /** Prefix topology for a non-terminal quote token (GMGN lineage / outer-market route). */
+  private static async resolveOuterQuoteTopology(input: {
     chainId: number;
     rawQuoteToken: Address;
     anchorToken: Address;
@@ -1555,7 +2068,7 @@ export class TradeService {
     anchorToken: Address;
     debug?: boolean;
   }): Promise<FlapStocksQuoteTopology | null> {
-    return await this.resolveFlapStocksQuoteTopology({
+    return await this.resolveOuterQuoteTopology({
       chainId: input.chainId,
       rawQuoteToken: input.rawQuoteToken,
       anchorToken: input.anchorToken,
@@ -1636,9 +2149,10 @@ export class TradeService {
     tokenAddress: Address;
     tokenInfo?: TokenInfo;
     baseTokenAddress?: Address;
+    prepareBudgetMs?: number;
   }): Promise<PreparedEvmTradeRoute | null> {
     try {
-      if (input.chainId === ChainId.SOL || input.chainId === ChainId.HYPER) return null;
+      if (input.chainId === ChainId.SOL) return null;
       const tokenInfo = input.tokenInfo ?? null;
       if (!tokenInfo) return null;
       const cacheKey = this.makePreparedEvmTradeRouteKey({
@@ -1649,7 +2163,11 @@ export class TradeService {
       });
       const cached = this.preparedEvmTradeRouteCache.get(cacheKey);
       if (cached && Date.now() - cached.ts < this.preparedEvmTradeRouteCacheMs) {
-        if (cached.value && this.hasUnusableRhV4Fee(cached.value.descs)) {
+        // hasUnusableRhV4Fee is RH-specific (V4 fee/tickSpacing readiness).
+        // Only screen cached routes on RH — other chains' V4 descs would be
+        // wrongly evicted (e.g. HYPER HyperSwapType.V4_EXACT_IN numerically
+        // equals SwapType.V4_EXACT_IN but is not RH V4).
+        if (cached.value && input.chainId === ChainId.RH && this.hasUnusableRhV4Fee(cached.value.descs)) {
           this.preparedEvmTradeRouteCache.delete(cacheKey);
         } else {
           return cached.value
@@ -1676,11 +2194,27 @@ export class TradeService {
         this.preparedEvmTradeRouteInFlight.delete(cacheKey);
       });
       this.preparedEvmTradeRouteInFlight.set(cacheKey, buildTask);
-      // Hard cap so UI never spins forever. Fee resolve uses page-bridge ≤900ms + PoolManager lpFee.
+      // Hard cap so UI never spins forever. Limit-order execution passes a
+      // longer budget; prepareBudgetMs <= 0 waits for the full build.
+      // RH V4 pool-key lookup (GMGN fee + hook hash) can exceed 1.2s.
+      const defaultBudgetMs = input.chainId === ChainId.BNB
+        ? 2_500
+        : input.chainId === ChainId.RH
+          ? 20_000
+          : 1_200;
+      const prepareBudgetMs = typeof input.prepareBudgetMs === 'number'
+        ? input.prepareBudgetMs
+        : defaultBudgetMs;
+      if (!(prepareBudgetMs > 0)) {
+        const value = await buildTask;
+        return value
+          ? { descs: this.cloneSwapDescLikeArray(value.descs) ?? [], preview: value.preview }
+          : null;
+      }
       const value = await Promise.race([
         buildTask,
         new Promise<PreparedEvmTradeRoute | null>((resolve) => {
-          setTimeout(() => resolve(null), 1_200);
+          setTimeout(() => resolve(null), prepareBudgetMs);
         }),
       ]);
       return value
@@ -1699,6 +2233,273 @@ export class TradeService {
       quoteDescs: this.cloneSwapDescLikeArray(prepared.descs.slice(0, -1)) ?? [],
       lastHop: { ...last },
     };
+  }
+
+  /** Prepared buy route ends at the meme token and has no unusable hops. */
+  private static isValidPreparedExecutionRoute(
+    chainId: number,
+    descs: SwapDescLike[] | null | undefined,
+    memeTokenAddress: Address,
+  ): boolean {
+    if (!descs?.length) return false;
+    const last = descs[descs.length - 1];
+    if (last.tokenOut.toLowerCase() !== memeTokenAddress.toLowerCase()) return false;
+    return descs.every((desc) => {
+      const swapType = Number(desc.swapType);
+      const isV2 = chainId === ChainId.RH
+        ? swapType === RhSwapType.V2_EXACT_IN
+        : swapType === SwapType.V2_EXACT_IN;
+      // A V2 hop with address(0) reverts V2_INVALID_PAIR.
+      if (isV2 && (!desc.poolAddress || desc.poolAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase())) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /** @deprecated Use isValidPreparedExecutionRoute */
+  private static isStandardPreparedDexRoute(
+    chainId: number,
+    descs: SwapDescLike[] | null | undefined,
+    memeTokenAddress: Address,
+  ): boolean {
+    return this.isValidPreparedExecutionRoute(chainId, descs, memeTokenAddress);
+  }
+
+  private static canUsePreparedExecutionTopology(
+    chainId: number,
+    preparedRoute: PreparedEvmTradeRoute | null | undefined,
+    memeTokenAddress: Address,
+  ): boolean {
+    return !!preparedRoute?.descs.length
+      && this.isValidPreparedExecutionRoute(chainId, preparedRoute.descs, memeTokenAddress);
+  }
+
+  /**
+   * V2/V3 hops wrap address(0) to the chain WNative inside the router.
+   * V4 pool currency is literal — rewriting WETH/WBNB to address(0) would miss the pool.
+   */
+  private static isNativeWrapSafeHop(swapType: number): boolean {
+    const kind = Number(swapType);
+    return kind === SwapType.V2_EXACT_IN || kind === SwapType.V3_EXACT_IN;
+  }
+
+  /**
+   * Router treats only address(0) as native. A prepared hop that starts at WNative
+   * makes swap() require msg.value == 0 ("UV") and then transferFrom that wrapped token.
+   * Native payment (BNB on BSC, ETH on RH) must enter as address(0) on V2/V3.
+   */
+  private static alignNativePaymentTokenIn(
+    chainId: number,
+    descs: SwapDescLike[],
+    baseTokenAddress: Address,
+  ): SwapDescLike[] {
+    if (!descs.length) return descs;
+    if (baseTokenAddress.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return descs;
+    if (!this.isNativeWrapSafeHop(descs[0].swapType)) return descs;
+    const wrapped = getChainRuntime(chainId).wrappedNativeAddress.toLowerCase();
+    if (descs[0].tokenIn.toLowerCase() !== wrapped) return descs;
+    return [{ ...descs[0], tokenIn: ZERO_ADDRESS }, ...descs.slice(1)];
+  }
+
+  /** Sell is the reverse route: native settlement leaves as address(0) so the router unwraps WNative. */
+  private static alignNativePayoutTokenOut(
+    chainId: number,
+    descs: SwapDescLike[],
+    baseTokenAddress: Address,
+  ): SwapDescLike[] {
+    if (!descs.length) return descs;
+    if (baseTokenAddress.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return descs;
+    const last = descs.length - 1;
+    if (!this.isNativeWrapSafeHop(descs[last].swapType)) return descs;
+    const wrapped = getChainRuntime(chainId).wrappedNativeAddress.toLowerCase();
+    if (descs[last].tokenOut.toLowerCase() !== wrapped) return descs;
+    const next = descs.slice();
+    next[last] = { ...next[last], tokenOut: ZERO_ADDRESS };
+    return next;
+  }
+
+  /** True launchpad inner hop only — migrated / outer-pool tokens must use DEX prepared route. */
+  private static shouldUseInnerLaunchpadHop(
+    tokenInfo: TokenInfo,
+    isInner: boolean,
+    launchpadConfig: { buyType: number; sellType: number; manager: Address } | null,
+  ): boolean {
+    return isInner && !!launchpadConfig
+      && !hasConfirmedFlapOuterRoute(tokenInfo)
+      && String(tokenInfo.tpool_launch_type || '').trim().toLowerCase() !== 'migrated';
+  }
+
+  /**
+   * Single execution entry for prepared routes (V2/V3/V4/Genius/Infinity/Pons/Hyper…).
+   * Buy submits forward descs; sell submits reverseSwapDescRoute(prepared).
+   * Topology comes from prewarm/UI/limit-order snapshot — only minOut is re-quoted off-chain.
+   */
+  private static async tryAppendPreparedDexExecutionRoute(input: {
+    side: 'buy' | 'sell';
+    chainId: number;
+    preparedRoute: PreparedEvmTradeRoute;
+    amountIn: bigint;
+    memeTokenAddress: Address;
+    tokenInfo: TokenInfo;
+    baseTokenAddress: Address;
+    isTurbo: boolean;
+    slippageBps: bigint;
+    poolFee?: number;
+    descs: SwapDescLike[];
+    timeStep?: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+    debug?: boolean;
+  }): Promise<{ minOut: bigint; quotedOutWei: bigint; estimatedOut: bigint } | null> {
+    if (!this.canUsePreparedExecutionTopology(input.chainId, input.preparedRoute, input.memeTokenAddress)) {
+      return null;
+    }
+    if (input.side === 'buy') {
+      const quote = await this.appendPreparedDexBuyRouteDescs({
+        chainId: input.chainId,
+        preparedDescs: input.preparedRoute.descs,
+        amountIn: input.amountIn,
+        tokenOut: input.memeTokenAddress,
+        tokenInfo: input.tokenInfo,
+        isTurbo: input.isTurbo,
+        poolFee: input.poolFee,
+        slippageBps: input.slippageBps,
+        descs: input.descs,
+        timeStep: input.timeStep,
+        debug: input.debug,
+      });
+      return {
+        minOut: quote.minOut,
+        quotedOutWei: quote.quotedOutWei,
+        estimatedOut: 0n,
+      };
+    }
+    const quote = await this.appendPreparedDexSellRouteDescs({
+      chainId: input.chainId,
+      preparedDescs: input.preparedRoute.descs,
+      amountIn: input.amountIn,
+      tokenIn: input.memeTokenAddress,
+      baseTokenAddress: input.baseTokenAddress,
+      isTurbo: input.isTurbo,
+      slippageBps: input.slippageBps,
+      descs: input.descs,
+      timeStep: input.timeStep,
+      debug: input.debug,
+    });
+    return {
+      minOut: quote.minOut,
+      quotedOutWei: 0n,
+      estimatedOut: quote.estimatedOut,
+    };
+  }
+
+  /**
+   * Submit the exact desc topology from prepareEvmTradeRoute (same as UI preview).
+   * Turbo: descs as-is. Default mode: walk the same hops for contract-level minOut only.
+   */
+  private static async appendPreparedDexBuyRouteDescs(input: {
+    chainId: number;
+    preparedDescs: SwapDescLike[];
+    amountIn: bigint;
+    tokenOut: Address;
+    tokenInfo: TokenInfo;
+    isTurbo: boolean;
+    poolFee?: number;
+    slippageBps: bigint;
+    descs: SwapDescLike[];
+    timeStep?: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+    debug?: boolean;
+  }): Promise<{ minOut: bigint; quotedOutWei: bigint }> {
+    const cloned = this.cloneSwapDescLikeArray(input.preparedDescs) ?? [];
+    if (!cloned.length) throw new Error('官方报价路径尚未就绪，请稍后再试');
+
+    let minOut = 0n;
+    let quotedOutWei = 0n;
+    if (!input.isTurbo) {
+      let hopAmount = input.amountIn;
+      for (let i = 0; i < cloned.length; i++) {
+        const quoteHop = () => this.quoteSwapDescExactIn(input.chainId, cloned[i], hopAmount);
+        const out = input.timeStep
+          ? await input.timeStep(`quote:prepared:hop${i}`, quoteHop)
+          : await quoteHop();
+        if (out <= 0n) {
+          throw new Error('官方报价路径尚未就绪，请稍后再试');
+        }
+        hopAmount = out;
+      }
+      quotedOutWei = hopAmount;
+      minOut = applySlippage(hopAmount, input.slippageBps);
+    }
+
+    this.logRoutePool(input.debug, 'buy.prepared.topology', {
+      chainId: input.chainId,
+      tokenOut: input.tokenOut,
+      hops: this.summarizeRouteDescs(cloned),
+      source: 'prepareEvmTradeRoute',
+    });
+    for (const desc of cloned) {
+      input.descs.push({
+        ...desc,
+        swapType: input.chainId === ChainId.RH
+          ? toRhDexSwapType(desc.swapType as SwapType)
+          : desc.swapType,
+      });
+    }
+    return { minOut, quotedOutWei };
+  }
+
+  /** Sell = reverse the same prepared topology the UI preview / buy path use. */
+  private static async appendPreparedDexSellRouteDescs(input: {
+    chainId: number;
+    preparedDescs: SwapDescLike[];
+    amountIn: bigint;
+    tokenIn: Address;
+    baseTokenAddress: Address;
+    isTurbo: boolean;
+    slippageBps: bigint;
+    descs: SwapDescLike[];
+    timeStep?: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+    debug?: boolean;
+  }): Promise<{ minOut: bigint; estimatedOut: bigint }> {
+    const reversed = this.reverseSwapDescRoute(input.preparedDescs);
+    if (!reversed?.length) throw new Error('官方报价路径尚未就绪，请稍后再试');
+    const cloned = this.cloneSwapDescLikeArray(reversed) ?? [];
+    if (!cloned.length) throw new Error('官方报价路径尚未就绪，请稍后再试');
+    if (cloned[0]?.tokenIn.toLowerCase() !== input.tokenIn.toLowerCase()) {
+      throw new Error('官方报价路径尚未就绪，请稍后再试');
+    }
+
+    let estimatedOut = 0n;
+    let minOut = 0n;
+    if (!input.isTurbo) {
+      let hopAmount = input.amountIn;
+      for (let i = 0; i < cloned.length; i++) {
+        const quoteHop = () => this.quoteSwapDescExactIn(input.chainId, cloned[i], hopAmount);
+        const out = input.timeStep
+          ? await input.timeStep(`quote:prepared:sell:hop${i}`, quoteHop)
+          : await quoteHop();
+        if (out <= 0n) throw new Error('官方报价路径尚未就绪，请稍后再试');
+        hopAmount = out;
+      }
+      estimatedOut = hopAmount;
+      minOut = applySlippage(estimatedOut, input.slippageBps);
+    }
+
+    this.logRoutePool(input.debug, 'sell.prepared.topology', {
+      chainId: input.chainId,
+      tokenIn: input.tokenIn,
+      baseTokenAddress: input.baseTokenAddress,
+      hops: this.summarizeRouteDescs(cloned),
+      source: 'prepareEvmTradeRoute',
+    });
+    for (const desc of cloned) {
+      input.descs.push({
+        ...desc,
+        swapType: input.chainId === ChainId.RH
+          ? toRhDexSwapType(desc.swapType as SwapType)
+          : desc.swapType,
+      });
+    }
+    return { minOut, estimatedOut };
   }
 
   private static preferHintFromDesc(desc: SwapDescLike | null | undefined): 'v2' | 'v3' | null {
@@ -1739,6 +2540,12 @@ export class TradeService {
     tokenAddress: Address,
   ): Promise<TokenInfo> {
     const declaredQuote = resolveEvmTradeQuoteToken(chainId, tokenInfo);
+
+    // Genius tokens are handled end-to-end by buildGeniusPreparedRoute (factory
+    // getLaunchedToken → geniusState), which short-circuits before this generic
+    // path. No poolIdToPoolKey RPC here — that was a second, redundant query
+    // for the same data the factory already exposes.
+
     const canReadOuterPool = chainId === ChainId.BNB
       && Number(tokenInfo.launchpad_status ?? 0) === 1
       && tokenInfo.flap_pool_model !== 'v4_cl';
@@ -1750,9 +2557,12 @@ export class TradeService {
       })
       : null;
     if (declaredQuote) {
+      // Keep an explicit stable quote (USDC/USDT/…). Do not let a different
+      // biggest-pool counterparty (often USDT) overwrite the declared USDC pair.
       if (
         !poolQuote
         || this.isEquivalentFlapRouteToken(chainId, declaredQuote, poolQuote.quoteTokenAddress)
+        || isTradeRouteTerminalQuote(chainId, declaredQuote)
       ) {
         return tokenInfo;
       }
@@ -1781,6 +2591,347 @@ export class TradeService {
     return tokenInfo;
   }
 
+  /**
+   * Genius route preview — single source of truth for Genius tokens.
+   *
+   * Both the UI route label (`prewarmTurbo` → `prepareEvmTradeRoute` → here) and
+   * the actual buy/sell execution derive the route from `getGeniusTradeState`
+   * (the factory's `getLaunchedToken`), NOT from a separate `poolIdToPoolKey`
+   * RPC. The bridge prefix reuses `buildOuterMarketBuyQuoteRoute` (the same
+   * cache execution's `appendBnbQuoteBridgeHop` uses), and the final hop uses
+   * `buildGeniusBuyDesc` with the factory's real `poolKey`. Amounts are
+   * placeholder (0) here — execution re-quotes with the real input amount.
+   */
+  private static async buildGeniusPreparedRoute(
+    chainId: number,
+    tokenInfo: TokenInfo,
+    tokenAddress: Address,
+    rawBaseTokenAddress?: Address,
+  ): Promise<PreparedEvmTradeRoute | null> {
+    if (chainId !== ChainId.BNB) return null;
+    if (!isGeniusPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) return null;
+    const geniusState = await getGeniusTradeState(tokenAddress).catch(() => null);
+    if (!geniusState?.tradeable) return null;
+
+    const quote = geniusState.quoteRouterToken;
+    const start = (
+      rawBaseTokenAddress && isAddressLike(rawBaseTokenAddress)
+        ? rawBaseTokenAddress
+        : ZERO_ADDRESS
+    ) as Address;
+
+    const descs: SwapDescLike[] = [];
+    if (!this.isEquivalentFlapRouteToken(chainId, start, quote)) {
+      let prefix: SwapDescLike[] | null = null;
+      const lineage = await this.resolveGmgnQuoteLineageForTarget(
+        chainId,
+        tokenAddress,
+        tokenAddress,
+      ).catch(() => null);
+      if (lineage?.length && isTradeRouteTerminalQuote(chainId, lineage[lineage.length - 1]?.quote)) {
+        const quoteIdx = lineage.findIndex((entry) => entry.token.toLowerCase() === quote.toLowerCase());
+        const prefixLineage = quoteIdx >= 0 ? lineage.slice(quoteIdx) : null;
+        if (prefixLineage?.length) {
+          prefix = await this.buildGmgnLineageBuyRoute({
+            chainId,
+            currentToken: start,
+            targetToken: quote,
+            lineage: prefixLineage,
+            debug: false,
+          }).catch(() => null);
+        }
+      }
+      if (
+        !prefix?.length
+        || !this.isEquivalentFlapRouteToken(chainId, prefix[prefix.length - 1]?.tokenOut, quote)
+      ) {
+        prefix = await this.buildOuterMarketBuyQuoteRoute({
+          chainId,
+          currentToken: start,
+          targetToken: quote,
+          lineageRootToken: tokenAddress,
+        }).catch(() => null);
+      }
+      if (
+        !prefix?.length
+        || !this.isEquivalentFlapRouteToken(chainId, prefix[prefix.length - 1]?.tokenOut, quote)
+      ) {
+        return null;
+      }
+      descs.push(...prefix);
+    }
+
+    descs.push(buildGeniusBuyDesc({ state: geniusState, tokenOut: tokenAddress, minOut: 0n }));
+
+    // Cache the full native→token route so later buys reuse BNB→…→quote→GENIUS.
+    if (
+      descs.length > 0
+      && isTradeRouteNativeToken(chainId, descs[0]?.tokenIn)
+      && this.isEquivalentFlapRouteToken(chainId, descs[descs.length - 1]?.tokenOut, tokenAddress)
+    ) {
+      setOuterMarketRoute(chainId, tokenAddress, descs);
+    }
+
+    return {
+      descs,
+      preview: this.toQuickTradeRoutePreview(
+        chainId,
+        tokenInfo,
+        descs,
+        descs.map(() => null),
+        descs.map(() => ({}) as Record<string, string>),
+        descs.map((desc) => (
+          desc.poolAddress && desc.poolAddress !== ZERO_ADDRESS ? desc.poolAddress : null
+        )),
+      ),
+    };
+  }
+
+  /**
+   * Pons inner route preview — single source of truth for RH Pons inner tokens.
+   *
+   * Mirrors buildGeniusPreparedRoute: the bridge prefix uses the SAME resolver
+   * the Pons execution path uses (appendRhRouterBridgeHops — RH-specific, with
+   * USDG intermediate + V4 fallback + toRhDexSwapType), and the final hop uses
+   * buildPonsBuyDesc with the factory's real quote. Amounts are placeholder
+   * (1n / 0n) here — execution re-quotes with the real input amount.
+   */
+  private static async buildPonsPreparedRoute(
+    chainId: number,
+    tokenInfo: TokenInfo,
+    tokenAddress: Address,
+    rawBaseTokenAddress?: Address,
+  ): Promise<PreparedEvmTradeRoute | null> {
+    if (chainId !== ChainId.RH) return null;
+    if (!isPonsPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) return null;
+    const ponsState = await getPonsTradeState(tokenAddress).catch(() => null);
+    if (!ponsState?.tradeable) return null;
+
+    const quote = ponsState.quoteRouterToken;
+    const start = (
+      rawBaseTokenAddress && isAddressLike(rawBaseTokenAddress)
+        ? rawBaseTokenAddress
+        : ZERO_ADDRESS
+    ) as Address;
+
+    const descs: SwapDescLike[] = [];
+    if (!this.isEquivalentFlapRouteToken(chainId, start, quote)) {
+      const passthroughTimeStep = async <T>(_label: string, fn: () => Promise<T>) => fn();
+      await this.appendRhRouterBridgeHops({
+        chainId,
+        tokenIn: start,
+        tokenOut: quote,
+        amountIn: 1n,
+        isTurbo: true,
+        descs,
+        timeStep: passthroughTimeStep,
+      }).catch(() => null);
+      if (
+        !descs.length
+        || !this.isEquivalentFlapRouteToken(chainId, descs[descs.length - 1]?.tokenOut, quote)
+      ) {
+        return null;
+      }
+    }
+
+    descs.push(buildPonsBuyDesc({ state: ponsState, tokenOut: tokenAddress, minOut: 0n }));
+
+    return {
+      descs,
+      preview: this.toQuickTradeRoutePreview(
+        chainId,
+        tokenInfo,
+        descs,
+        descs.map(() => null),
+        descs.map(() => ({}) as Record<string, string>),
+        descs.map((desc) => (
+          desc.poolAddress && desc.poolAddress !== ZERO_ADDRESS ? desc.poolAddress : null
+        )),
+      ),
+    };
+  }
+
+  /**
+   * HyperAltfun route preview — single source of truth for HYPER alt.fun tokens.
+   *
+   * Mirrors buildGeniusPreparedRoute: the bridge prefix reuses
+   * buildOuterMarketBuyQuoteRoute (the same resolver the generic path and the
+   * Hyper execution bridge use), and the final hop is the platform-specific
+   * HYPER_ZAP_BUY desc with a placeholder minOut (0n) — execution re-quotes
+   * with the real input amount and rebuilds the final hop with the real minOut
+   * (it is encoded into the desc's data, so it cannot be patched in place).
+   */
+  private static async buildHyperPreparedRoute(
+    chainId: number,
+    tokenInfo: TokenInfo,
+    tokenAddress: Address,
+    rawBaseTokenAddress?: Address,
+  ): Promise<PreparedEvmTradeRoute | null> {
+    if (chainId !== ChainId.HYPER) return null;
+    if (!isHyperAltfunPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) return null;
+    const hyperState = await getHyperTradeState(tokenAddress).catch(() => null);
+    if (!hyperState || (!hyperState.isInner && !hyperState.isOuter)) return null;
+
+    const quote = getHyperUsdcAddress();
+    const start = (
+      rawBaseTokenAddress && isAddressLike(rawBaseTokenAddress)
+        ? rawBaseTokenAddress
+        : ZERO_ADDRESS
+    ) as Address;
+
+    const descs: SwapDescLike[] = [];
+    if (!this.isEquivalentFlapRouteToken(chainId, start, quote)) {
+      const prefix = await this.buildOuterMarketBuyQuoteRoute({
+        chainId,
+        currentToken: start,
+        targetToken: quote,
+      }).catch(() => null);
+      if (
+        !prefix?.length
+        || !this.isEquivalentFlapRouteToken(chainId, prefix[prefix.length - 1]?.tokenOut, quote)
+      ) {
+        return null;
+      }
+      descs.push(...prefix);
+    }
+
+    descs.push(getRouterSwapDesc({
+      swapType: HyperSwapType.HYPER_ZAP_BUY,
+      tokenIn: quote,
+      tokenOut: tokenAddress,
+      poolAddress: ZERO_ADDRESS,
+      fee: 0,
+      data: encodeHyperZapBuyData(0n),
+    }));
+
+    return {
+      descs,
+      preview: this.toQuickTradeRoutePreview(
+        chainId,
+        tokenInfo,
+        descs,
+        descs.map(() => null),
+        descs.map(() => ({}) as Record<string, string>),
+        descs.map((desc) => (
+          desc.poolAddress && desc.poolAddress !== ZERO_ADDRESS ? desc.poolAddress : null
+        )),
+      ),
+    };
+  }
+
+  /**
+   * Authoritative route from mutil_window fields on tokenInfo:
+   * pool.quote_address + pool.pool_address (+ GMGN lineage prefix when quote is non-terminal).
+   */
+  private static async buildMutilWindowPreparedRoute(
+    chainId: number,
+    tokenInfo: TokenInfo,
+    tokenAddress: Address,
+    rawBaseTokenAddress?: Address,
+  ): Promise<PreparedEvmTradeRoute | null> {
+    if (!supportsGmgnMutilWindowLineageChain(chainId)) return null;
+    if (isEvmInnerLaunchpadToken(chainId, tokenInfo)) return null;
+
+    const quote = resolveEvmGmgnDirectQuoteToken(chainId, tokenInfo);
+    const v4PoolId = chainId === ChainId.RH ? this.rhV4PoolIdFromTokenInfo(tokenInfo) : null;
+    const poolAddress = v4PoolId ?? this.getKnownDexPoolAddress(tokenInfo);
+    if (!quote || !poolAddress) {
+      if (chainId === ChainId.RH) {
+        console.info('[trade.rh.v4.route.skip]', {
+          tokenAddress,
+          quote: quote ?? null,
+          quoteField: tokenInfo.quote_token_address ?? null,
+          poolPair: tokenInfo.pool_pair ?? null,
+          biggestPool: tokenInfo.biggest_pool_address ?? null,
+        });
+      }
+      return null;
+    }
+    if (!v4PoolId && !isAddressLike(poolAddress)) return null;
+    if (this.isEquivalentFlapRouteToken(chainId, quote, tokenAddress)) return null;
+
+    const start = (
+      this.normalizeFlapPoolCounterpartyToken(chainId, rawBaseTokenAddress)
+      ?? ZERO_ADDRESS
+    ) as Address;
+
+    const finishPrepared = (descs: SwapDescLike[]): PreparedEvmTradeRoute => {
+      if (
+        chainId === ChainId.BNB
+        && descs.length > 0
+        && isTradeRouteNativeToken(chainId, descs[0]?.tokenIn)
+        && this.isEquivalentFlapRouteToken(chainId, descs[descs.length - 1]?.tokenOut, tokenAddress)
+      ) {
+        setOuterMarketRoute(chainId, tokenAddress, descs);
+      }
+      return {
+        descs,
+        preview: this.toQuickTradeRoutePreview(
+          chainId,
+          tokenInfo,
+          descs,
+          descs.map(() => null),
+          descs.map(() => ({} as Record<string, string>)),
+          descs.map((desc) => (
+            desc.poolAddress && desc.poolAddress !== ZERO_ADDRESS ? desc.poolAddress : null
+          )),
+        ),
+      };
+    };
+
+    const descs: SwapDescLike[] = [];
+    let tokenIn: Address = start;
+
+    if (!this.isEquivalentFlapRouteToken(chainId, tokenIn, quote)) {
+      const prefix = await this.buildOuterMarketBuyQuoteRoute({
+        chainId,
+        currentToken: tokenIn,
+        targetToken: quote as Address,
+        lineageRootToken: tokenAddress,
+      }).catch(() => null);
+      if (
+        !prefix?.length
+        || !this.isEquivalentFlapRouteToken(chainId, prefix[prefix.length - 1]?.tokenOut, quote)
+      ) {
+        return null;
+      }
+      descs.push(...prefix);
+      tokenIn = quote as Address;
+    }
+
+    if (this.isEquivalentFlapRouteToken(chainId, tokenIn, tokenAddress)) {
+      return descs.length ? finishPrepared(descs) : null;
+    }
+
+    const preferHint = v4PoolId
+      ? 'v4' as const
+      : (this.normalizeDexPrefer(tokenInfo.dex_type)
+        ?? (String(tokenInfo.pool_exchange || '').toLowerCase().includes('v3') ? 'v3' as const : 'v2' as const));
+    try {
+      descs.push(await this.resolveKnownPoolRouteDesc({
+        chainId,
+        tokenIn,
+        tokenOut: tokenAddress,
+        poolAddress: poolAddress as Address,
+        preferHint,
+        dexType: tokenInfo.pool_exchange || tokenInfo.dex_type || null,
+        v3Factory: tokenInfo.pool_factory && isAddressLike(tokenInfo.pool_factory)
+          ? tokenInfo.pool_factory as Address
+          : null,
+      }));
+      return finishPrepared(descs);
+    } catch (error) {
+      if (v4PoolId) {
+        console.info('[trade.rh.v4.route.fail]', {
+          tokenAddress,
+          poolAddress,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return null;
+    }
+  }
+
   private static async buildPreparedEvmTradeRoute(
     chainId: number,
     tokenInfo: TokenInfo,
@@ -1792,6 +2943,56 @@ export class TradeService {
         rawTokenAddress || tokenInfo.address,
         'token address',
       ) as Address;
+      // Genius tokens: one source of truth — derive the route from the factory's
+      // getLaunchedToken (geniusState), the same query execution uses. Skip the
+      // generic DexScreener / poolIdToPoolKey path so the preview matches the
+      // actual buy and no redundant Infinity RPC is fired.
+      if (isGeniusPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) {
+        const geniusRoute = await this.buildGeniusPreparedRoute(
+          chainId,
+          tokenInfo,
+          tokenAddress,
+          rawBaseTokenAddress,
+        ).catch(() => null);
+        if (geniusRoute) return geniusRoute;
+        // geniusState unavailable (factory unreachable) → fall through to generic
+      }
+      // Pons inner (RH): one source of truth — derive the route from
+      // getPonsTradeState (the same query execution uses) and the RH-specific
+      // bridge resolver (appendRhRouterBridgeHops). Skip the generic
+      // DexScreener path so the preview matches the actual buy.
+      if (isPonsPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) {
+        const ponsRoute = await this.buildPonsPreparedRoute(
+          chainId,
+          tokenInfo,
+          tokenAddress,
+          rawBaseTokenAddress,
+        ).catch(() => null);
+        if (ponsRoute) return ponsRoute;
+        // ponsState unavailable → fall through to generic
+      }
+      // HyperAltfun (HYPER): one source of truth — derive the route from
+      // getHyperTradeState (the same query execution uses) and the generic
+      // outer-market bridge resolver. The final hop is the platform-specific
+      // HYPER_ZAP_BUY desc; execution rebuilds it with the real minOut.
+      if (isHyperAltfunPlatform(resolveTradeLaunchpadPlatform(tokenInfo))) {
+        const hyperRoute = await this.buildHyperPreparedRoute(
+          chainId,
+          tokenInfo,
+          tokenAddress,
+          rawBaseTokenAddress,
+        ).catch(() => null);
+        if (hyperRoute) return hyperRoute;
+        // hyperState unavailable → fall through to generic
+      }
+      const mutilWindowRoute = await this.buildMutilWindowPreparedRoute(
+        chainId,
+        tokenInfo,
+        tokenAddress,
+        rawBaseTokenAddress,
+      ).catch(() => null);
+      if (mutilWindowRoute?.descs.length) return mutilWindowRoute;
+
       const routedInfo = await this.resolvePreparedRouteTokenInfo(chainId, tokenInfo, tokenAddress);
       const plan = planEvmTradeRoute({
         chainId,
@@ -1811,17 +3012,29 @@ export class TradeService {
         liquidityUsd: Array<number | null>,
         symbols: Array<Record<string, string>>,
         displayPools: Array<string | null>,
-      ): PreparedEvmTradeRoute => ({
-        descs,
-        preview: this.toQuickTradeRoutePreview(
-          chainId,
-          routedInfo,
+      ): PreparedEvmTradeRoute => {
+        // Cache full native→token route so Genius-quoted tokens can reuse
+        // BNB→USDC→GENIUS(Infinity) instead of DexScreener USDT homes.
+        if (
+          chainId === ChainId.BNB
+          && descs.length > 0
+          && isTradeRouteNativeToken(chainId, descs[0]?.tokenIn)
+          && this.isEquivalentFlapRouteToken(chainId, descs[descs.length - 1]?.tokenOut, tokenAddress)
+        ) {
+          setOuterMarketRoute(chainId, tokenAddress, descs);
+        }
+        return {
           descs,
-          liquidityUsd,
-          symbols,
-          displayPools,
-        ),
-      });
+          preview: this.toQuickTradeRoutePreview(
+            chainId,
+            routedInfo,
+            descs,
+            liquidityUsd,
+            symbols,
+            displayPools,
+          ),
+        };
+      };
       const concatPrefixLast = async (prefixDescs: SwapDescLike[]) => {
         const lastPlan: EvmTradeRoutePlan = {
           ...plan,
@@ -1850,6 +3063,7 @@ export class TradeService {
           chainId,
           currentToken: start,
           targetToken: quote,
+          lineageRootToken: tokenAddress,
         }).catch(() => null);
         if (
           !via?.length
@@ -2004,7 +3218,10 @@ export class TradeService {
   }
 
   private static isV4ExactInDesc(desc: SwapDescLike | null | undefined): boolean {
-    return !!desc && desc.swapType === SwapType.V4_EXACT_IN;
+    if (!desc) return false;
+    // BSC Pancake Infinity uses poolKey (hooks/parameters), not a V2/V3 pair address.
+    return desc.swapType === SwapType.V4_EXACT_IN
+      || desc.swapType === SwapType.PANCAKE_INFINITY_EXACT_IN;
   }
 
   private static takePreparedV4LastHop(
@@ -2125,82 +3342,6 @@ export class TradeService {
     return hooks;
   }
 
-  /**
-   * Targeted Initialize(poolId) lookup — topic-filtered, not a full-chain scan.
-   * Needed when hooks are unknown (GMGN fee_info has no hooks field).
-   */
-  private static async readRhV4PoolKeyFromInitialize(
-    poolId: string,
-  ): Promise<{ fee: number; tickSpacing: number; hooks: Address } | null> {
-    const id = String(poolId || '').trim().toLowerCase();
-    if (!this.isRhV4PoolId(id)) return null;
-    if (this.rhV4InitializeKeyCache.has(id)) {
-      return this.rhV4InitializeKeyCache.get(id) ?? null;
-    }
-    const inflight = this.rhV4InitializeKeyInFlight.get(id);
-    if (inflight) return await inflight;
-
-    const task = (async () => {
-      const poolManager = this.rhV4PoolManager();
-      if (!poolManager || poolManager === ZERO_ADDRESS) {
-        this.rhV4InitializeKeyCache.set(id, null);
-        return null;
-      }
-      try {
-        const latest = await RpcService.withBalancedReadClient({
-          chainId: ChainId.RH,
-          caller: 'trade.v4.initialize.blockNumber',
-          run: async (client) => await client.getBlockNumber(),
-        });
-        // Expand windows newest-first; indexed topic1=poolId keeps each query light.
-        const windows = [100_000n, 1_000_000n, 10_000_000n, latest];
-        for (const window of windows) {
-          const fromBlock = window >= latest ? 0n : (latest > window ? latest - window : 0n);
-          try {
-            const logs = await RpcService.withBalancedReadClient({
-              chainId: ChainId.RH,
-              caller: 'trade.v4.initialize.getLogs',
-              run: async (client) => await client.getLogs({
-                address: poolManager,
-                event: uniswapV4InitializeEvent,
-                args: { id: id as `0x${string}` },
-                fromBlock,
-                toBlock: 'latest',
-              }),
-            });
-            const log = logs?.[0];
-            if (!log) continue;
-            const fee = Number((log as any).args?.fee ?? 0);
-            const tickSpacing = Number((log as any).args?.tickSpacing ?? 0);
-            const hooksRaw = String((log as any).args?.hooks || '').trim();
-            const hooks = (isAddressLike(hooksRaw) ? hooksRaw : ZERO_ADDRESS) as Address;
-            if (!(fee >= 0) || !(tickSpacing > 0)) continue;
-            const value = { fee, tickSpacing, hooks };
-            this.rhV4InitializeKeyCache.set(id, value);
-            if (fee > 0 && (fee & ~0x800000) > 0) {
-              this.rhV4DisplayFeeByPoolId.set(id, fee & ~0x800000);
-            } else if (fee > 0) {
-              // dynamic — keep prior lpFee display if any
-            }
-            return value;
-          } catch {
-            // RPC may reject oversized ranges; try next window.
-          }
-        }
-        this.rhV4InitializeKeyCache.set(id, null);
-        return null;
-      } catch {
-        this.rhV4InitializeKeyCache.set(id, null);
-        return null;
-      } finally {
-        this.rhV4InitializeKeyInFlight.delete(id);
-      }
-    })();
-
-    this.rhV4InitializeKeyInFlight.set(id, task);
-    return await task;
-  }
-
   private static async resolveRhV4PoolKeyFromSources(input: {
     chainId: number;
     tokenIn: Address;
@@ -2217,27 +3358,18 @@ export class TradeService {
       return all.findIndex((item) => item.toLowerCase() === token.toLowerCase()) === index;
     });
 
-    // Parallel: GMGN fee + PoolManager lpFee + targeted Initialize(poolId) for hooks.
-    const [gmgnLists, lpFee, fromInit] = await Promise.all([
+    // GMGN token_pool_fee_info is the fee + tickSpacing source. Hooks come from a local hash against known hooks.
+    const [gmgnLists, lpFee] = await Promise.all([
       tokens.length
         ? Promise.all(
-          tokens.map((token) => fetchGmgnTokenPoolFeeInfoPreferPage(chain, token, { timeoutMs: 800 }).catch(() => [])),
+          tokens.map((token) => fetchGmgnTokenPoolFeeInfoPreferPage(chain, token, { timeoutMs: 2_000 }).catch(() => [])),
         )
         : Promise.resolve([] as Awaited<ReturnType<typeof fetchGmgnTokenPoolFeeInfoPreferPage>>[]),
       this.readRhV4LpFeeFromPoolManager(poolId),
-      this.readRhV4PoolKeyFromInitialize(poolId),
     ]);
 
-    // Initialize is authoritative (fee + tickSpacing + hooks).
-    if (fromInit && fromInit.tickSpacing > 0 && fromInit.fee >= 0) {
-      const display = (fromInit.fee & ~0x800000) > 0
-        ? (fromInit.fee & ~0x800000)
-        : (lpFee && lpFee > 0 ? lpFee : null);
-      if (display && display > 0) this.rhV4DisplayFeeByPoolId.set(poolId, display);
-      return fromInit;
-    }
-
     let gmgnFee: number | null = null;
+    let gmgnTickSpacing: number | null = null;
     for (const list of gmgnLists) {
       const hit = GmgnAPI.findTokenPoolFeeInfo(list, poolId);
       if (!hit) continue;
@@ -2247,6 +3379,7 @@ export class TradeService {
       );
       if (typeof feeFromRatio === 'number' && feeFromRatio >= 0) {
         gmgnFee = feeFromRatio;
+        gmgnTickSpacing = GmgnAPI.tickSpacingFromPoolFeeParams(hit.fee_params);
         break;
       }
     }
@@ -2259,7 +3392,7 @@ export class TradeService {
       [gmgnFee, lpFee, feeHint]
         .filter((fee): fee is number => typeof fee === 'number' && Number.isFinite(fee) && fee >= 0),
     )];
-    // Always try fee=0 when recovering hook pools (Initialize miss / lpFee unread).
+    // Always try fee=0 when recovering hook pools (lpFee unread).
     if (!feeCandidates.includes(0)) feeCandidates.push(0);
     if (!feeCandidates.length) return null;
 
@@ -2275,6 +3408,7 @@ export class TradeService {
       ...this.rhV4CurrencyCandidates(input.tokenOut),
     ];
     const tickHints = [
+      ...(gmgnTickSpacing && gmgnTickSpacing > 0 ? [gmgnTickSpacing] : []),
       ...feeCandidates.map((fee) => {
         const staticFee = fee & ~0x800000;
         return this.v4TickSpacingForFee(staticFee > 0 ? staticFee : fee);
@@ -2299,7 +3433,7 @@ export class TradeService {
       };
     }
 
-    // Do NOT guess hooks=0 — that built "V4 1%" labels that still revert (e.g. STANDARD).
+    // GMGN has no hooks field. Unknown hooks are not guessed, and Initialize logs are not scanned.
     return null;
   }
 
@@ -2319,17 +3453,26 @@ export class TradeService {
     ].join(':');
     const cached = this.rhV4PoolKeyCache.get(cacheKey);
     if (cached) return await cached;
-    // Fee/hooks: Initialize(poolId) when needed, else GMGN/lpFee + hash verify on known hooks.
-    // No full-chain getLogs scan / fee brute-force.
+      // Fee/hooks: GMGN token_pool_fee_info + hash verify on known hooks. No Initialize getLogs.
     const task = (async () => {
       if (this.isRhV4PoolId(poolId)) {
-        return await this.resolveRhV4PoolKeyFromSources({
+        const resolved = await this.resolveRhV4PoolKeyFromSources({
           chainId: input.chainId ?? ChainId.RH,
           tokenIn: input.tokenIn,
           tokenOut: input.tokenOut,
           poolId,
           feeHint: input.feeHint,
         });
+        console.info('[trade.rh.v4.poolKey]', {
+          poolId,
+          tokenIn: input.tokenIn,
+          tokenOut: input.tokenOut,
+          ok: !!resolved,
+          fee: resolved?.fee ?? null,
+          tickSpacing: resolved?.tickSpacing ?? null,
+          hooks: resolved?.hooks ?? null,
+        });
+        return resolved;
       }
 
       const pons = await getPonsTradeState(input.tokenOut).catch(() => null);
@@ -2479,6 +3622,250 @@ export class TradeService {
     return amount;
   }
 
+  private static async quoteSwapDescExactIn(
+    chainId: number,
+    desc: SwapDescLike,
+    amountIn: bigint,
+  ): Promise<bigint> {
+    if (amountIn <= 0n) return 0n;
+    if (desc.swapType === SwapType.PANCAKE_INFINITY_EXACT_IN) {
+      if (!desc.poolManager || desc.poolManager === ZERO_ADDRESS) return 0n;
+      return await quotePancakeInfinityExactIn({
+        poolKey: {
+          currency0: desc.tokenIn.toLowerCase() < desc.tokenOut.toLowerCase() ? desc.tokenIn : desc.tokenOut,
+          currency1: desc.tokenIn.toLowerCase() < desc.tokenOut.toLowerCase() ? desc.tokenOut : desc.tokenIn,
+          hooks: desc.hooks ?? ZERO_ADDRESS,
+          poolManager: desc.poolManager,
+          fee: desc.fee,
+          parameters: (desc.parameters ?? ZERO32) as Hex,
+        },
+        tokenIn: desc.tokenIn,
+        tokenOut: desc.tokenOut,
+        amountIn,
+      });
+    }
+    const quoted = await resolveDexExactIn(
+      chainId,
+      desc.tokenIn,
+      desc.tokenOut,
+      amountIn,
+      {
+        v3Fee: desc.fee || undefined,
+        poolPair: desc.poolAddress && desc.poolAddress !== ZERO_ADDRESS ? desc.poolAddress : undefined,
+        prefer: desc.swapType === SwapType.V3_EXACT_IN ? 'v3' : desc.swapType === SwapType.V2_EXACT_IN ? 'v2' : undefined,
+      },
+      false,
+      true,
+    ).catch(() => null);
+    return quoted?.amountOut && quoted.amountOut > 0n ? quoted.amountOut : 0n;
+  }
+
+  private static async resolveTokenInfoForOuterMarket(
+    chainId: number,
+    tokenAddress: Address,
+  ): Promise<TokenInfo | null> {
+    if (chainId !== ChainId.BNB) return null;
+    const chain = String(chainNames[chainId as ChainId] || '').trim().toLowerCase();
+    if (!chain) return null;
+    try {
+      return await GmgnAPI.getTokenInfo(chain, tokenAddress);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * When the outer-market target itself trades on Pancake Infinity (bytes32 poolId),
+   * build native→stable→target via PoolKey instead of DexScreener's thinner V2/V3 home.
+   * Example: GENIUS biggest_pool is Infinity/USDC, but DexScreener ranks Uniswap USDT V3 first.
+   */
+  private static async tryBuildBnbInfinityOuterBuyRoute(input: {
+    chainId: number;
+    currentToken: Address;
+    targetToken: Address;
+    debug?: boolean;
+  }): Promise<SwapDescLike[] | null> {
+    if (input.chainId !== ChainId.BNB) return null;
+    if (isTradeRouteTerminalQuote(input.chainId, input.targetToken)) return null;
+    if (this.isEquivalentFlapRouteToken(input.chainId, input.currentToken, input.targetToken)) return [];
+
+    const tokenInfo = await this.resolveTokenInfoForOuterMarket(input.chainId, input.targetToken);
+    const poolId = tokenInfo ? extractPancakeInfinityPoolId(tokenInfo) : null;
+    if (!tokenInfo || !poolId) return null;
+    const dex = String(tokenInfo.dex_type || '').trim();
+    if (!isPancakeInfinityDexText(dex)) {
+      const peek = peekCachedPancakeInfinityPoolKey(poolId);
+      if (peek === null) return null;
+      if (peek === undefined && dex) return null;
+    }
+    const infinity = await resolveBnbInfinityRouteFromTokenInfo({
+      tokenAddress: input.targetToken,
+      tokenInfo,
+    }).catch(() => null);
+    if (!infinity) return null;
+
+    const quote = infinity.quoteRouterToken;
+    const descs: SwapDescLike[] = [];
+    if (!this.isEquivalentFlapRouteToken(input.chainId, input.currentToken, quote)) {
+      if (isTradeRouteTerminalQuote(input.chainId, quote)) {
+        descs.push(await this.resolveRouteHopDesc({
+          chainId: input.chainId,
+          tokenIn: input.currentToken,
+          tokenOut: quote,
+          prefer: getBridgeTokenDexPreference(input.chainId as ChainId, quote) ?? null,
+        }));
+      } else {
+        const prefix = await this.buildOuterMarketBuyQuoteRoute({
+          chainId: input.chainId,
+          currentToken: input.currentToken,
+          targetToken: quote,
+          debug: input.debug,
+          depth: 0,
+        });
+        if (!prefix?.length) return null;
+        descs.push(...prefix);
+      }
+    }
+    descs.push(buildPancakeInfinityExactInDesc({
+      tokenIn: quote,
+      tokenOut: input.targetToken,
+      poolKey: infinity.poolKey,
+    }));
+    this.logRoutePool(input.debug, 'buy.branch', {
+      chainId: input.chainId,
+      currentToken: input.currentToken,
+      targetToken: input.targetToken,
+      branch: 'bnb_infinity_pool_key',
+      quote,
+      poolId: infinity.poolId,
+      hops: this.summarizeRouteDescs(descs),
+    });
+    return descs;
+  }
+
+  private static async appendBnbQuoteBridgeHop(input: {
+    chainId: number;
+    tokenIn: Address;
+    tokenOut: Address;
+    amountIn: bigint;
+    isTurbo: boolean;
+    descs: SwapDescLike[];
+    timeStep: <T>(label: string, fn: () => Promise<T>) => Promise<T>;
+    label?: string;
+  }): Promise<bigint> {
+    if (input.tokenIn.toLowerCase() === input.tokenOut.toLowerCase()) return input.amountIn;
+
+    // Prefer outer-market / Infinity routes over DexScreener USDT-first bridges.
+    // Genius pairToken (e.g. GENIUS) must reuse BNB→USDC→Infinity, not Uniswap USDT V3.
+    const isBuyBridge = isTradeRouteNativeToken(input.chainId, input.tokenIn)
+      && !isTradeRouteNativeToken(input.chainId, input.tokenOut);
+    const isSellBridge = isTradeRouteNativeToken(input.chainId, input.tokenOut)
+      && !isTradeRouteNativeToken(input.chainId, input.tokenIn);
+
+    if (isBuyBridge || isSellBridge) {
+      try {
+        const nativeToken = (isBuyBridge ? input.tokenIn : input.tokenOut) as Address;
+        const marketToken = (isBuyBridge ? input.tokenOut : input.tokenIn) as Address;
+        const buyRoute = await input.timeStep(
+          `${input.label || 'quote:bnb:bridge'}:outer`,
+          () => this.buildOuterMarketBuyQuoteRoute({
+            chainId: input.chainId,
+            currentToken: nativeToken,
+            targetToken: marketToken,
+          }),
+        );
+        const route = isBuyBridge
+          ? buyRoute
+          : this.reverseSwapDescRoute(buyRoute);
+        if (route?.length) {
+          input.descs.push(...route);
+          if (input.isTurbo) return 1n;
+          let amount = input.amountIn;
+          for (const desc of route) {
+            amount = await this.quoteSwapDescExactIn(input.chainId, desc, amount);
+            if (amount <= 0n) throw new Error('报价资产桥接报价失败');
+          }
+          return amount;
+        }
+      } catch {
+        // Fall through to legacy direct / USDC-USDT bridge.
+      }
+    }
+
+    const tryHop = async (tokenIn: Address, tokenOut: Address, amountIn: bigint, label: string): Promise<bigint> => {
+      const bridgePrefer = getBridgeTokenDexPreference(input.chainId as ChainId, tokenOut)
+        ?? getBridgeTokenDexPreference(input.chainId as ChainId, tokenIn);
+      const quoted = await input.timeStep(label, () =>
+        resolveBridgeHopExactIn(
+          input.chainId,
+          tokenIn,
+          tokenOut,
+          amountIn,
+          bridgePrefer,
+          input.isTurbo,
+          !input.isTurbo,
+        )
+      );
+      if (input.isTurbo) {
+        if (!quoted.poolAddress || quoted.poolAddress === ZERO_ADDRESS) {
+          throw new Error('找不到报价资产桥接交易池');
+        }
+      } else {
+        try {
+          assertDexQuoteOk(quoted);
+        } catch {
+          throw new Error('找不到报价资产桥接交易池');
+        }
+        if (quoted.amountOut <= 0n) throw new Error('报价资产桥接报价失败');
+      }
+      input.descs.push(getRouterSwapDesc({
+        swapType: quoted.swapType,
+        tokenIn,
+        tokenOut,
+        poolAddress: quoted.poolAddress,
+        fee: getV3FeeForDesc(quoted, getDefaultBridgeV3Fee(input.chainId)),
+      }));
+      return input.isTurbo ? 1n : quoted.amountOut;
+    };
+
+    try {
+      return await tryHop(input.tokenIn, input.tokenOut, input.amountIn, input.label || 'quote:bnb:bridge');
+    } catch (directError) {
+      // Prefer USDC before USDT when falling back — Infinity / Genius quotes are often USDC.
+      const intermediates = [
+        bscTokens.usdc.address as Address,
+        bscTokens.usdt.address as Address,
+      ];
+      let lastError: unknown = directError;
+      for (const mid of intermediates) {
+        const midLower = mid.toLowerCase();
+        if (
+          input.tokenIn.toLowerCase() === midLower
+          || input.tokenOut.toLowerCase() === midLower
+        ) {
+          continue;
+        }
+        try {
+          const midAmount = await tryHop(
+            input.tokenIn,
+            mid,
+            input.amountIn,
+            `${input.label || 'quote:bnb:bridge'}:via:${midLower.slice(0, 10)}`,
+          );
+          return await tryHop(
+            mid,
+            input.tokenOut,
+            midAmount,
+            `${input.label || 'quote:bnb:bridge'}:quote`,
+          );
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    }
+  }
+
   private static async materializeEvmTradeRoutePlan(
     chainId: number,
     tokenInfo: TokenInfo,
@@ -2523,6 +3910,30 @@ export class TradeService {
             }
           }
         }
+        const isLastMarketHop = tokenOut.toLowerCase() === String(tokenInfo.address || '').toLowerCase();
+        // Prefer Infinity before any DexScreener V2/V3 pair when GMGN's biggest pool is a poolId.
+        if (isLastMarketHop && chainId === ChainId.BNB) {
+          const infinity = await resolveBnbInfinityRouteFromTokenInfo({
+            tokenAddress: tokenOut,
+            tokenInfo,
+          }).catch(() => null);
+          if (
+            infinity
+            && this.isEquivalentFlapRouteToken(chainId, tokenIn, infinity.quoteRouterToken)
+          ) {
+            const desc = buildPancakeInfinityExactInDesc({
+              tokenIn,
+              tokenOut,
+              poolKey: infinity.poolKey,
+            });
+            return {
+              desc,
+              liquidityUsd: null,
+              symbols: {} as Record<string, string>,
+              displayPool: infinity.poolId,
+            };
+          }
+        }
         const knownHopPool = hop.poolAddress && isAddressLike(hop.poolAddress) && hop.dexLabel !== 'V4'
           ? hop.poolAddress as Address
           : null;
@@ -2545,7 +3956,6 @@ export class TradeService {
           } catch {
           }
         }
-        const isLastMarketHop = tokenOut.toLowerCase() === String(tokenInfo.address || '').toLowerCase();
         if (isLastMarketHop && chainId !== ChainId.RH) {
           const official = this.getKnownDexPoolAddress(tokenInfo);
           const lastPool = (official && isAddressLike(official)) ? official : knownHopPool;
@@ -2743,6 +4153,12 @@ export class TradeService {
           && hop.dexLabel !== 'V4'
         ) {
           try {
+            const v3FactoryHint = isLastMarketHop && tokenInfo.pool_factory && isAddressLike(tokenInfo.pool_factory)
+              ? tokenInfo.pool_factory as Address
+              : null;
+            const dexTypeHint = isLastMarketHop
+              ? (tokenInfo.pool_exchange || tokenInfo.dex_type || null)
+              : null;
             const desc = await this.resolveKnownPoolRouteDesc({
               chainId,
               tokenIn,
@@ -2751,6 +4167,8 @@ export class TradeService {
               // Do not invent preferHint here — getKnownPoolRouteMeta classifies on-chain.
               preferHint: execPrefer === 'v3' ? 'v3' : execPrefer === 'v2' ? 'v2' : null,
               fee: preferred?.fee ?? hop.fee ?? pairMeta.fee,
+              dexType: dexTypeHint,
+              v3Factory: v3FactoryHint,
             });
             return {
               desc,
@@ -2868,6 +4286,7 @@ export class TradeService {
     if (swapType === SwapType.FOUR_MEME_BUY_AMAP || swapType === SwapType.FOUR_MEME_SELL) return 'four.meme';
     if (swapType === SwapType.FLAP_EXACT_INPUT) return 'Flap';
     if (swapType === SwapType.OPEN_FOUR_EXACT_IN) return 'OpenFour';
+    if (swapType === SwapType.GENIUS_BUY || swapType === SwapType.GENIUS_SELL) return 'Genius';
     if (swapType === SwapType.V2_EXACT_IN) return 'V2';
     return 'DEX';
   }
@@ -2921,62 +4340,6 @@ export class TradeService {
     const buyLabel = symbols.join(' → ');
     const sellLabel = [...symbols].reverse().join(' → ');
     return { buyLabel, sellLabel, hops };
-  }
-
-  private static async buildDeterministicFlapStocksBuyQuoteRoute(input: {
-    chainId: number;
-    currentToken: Address;
-    targetToken: Address;
-    debug?: boolean;
-    depth?: number;
-  }): Promise<SwapDescLike[] | null> {
-    const topology = await this.resolveFlapStocksQuoteTopology({
-      chainId: input.chainId,
-      rawQuoteToken: input.targetToken,
-      anchorToken: input.currentToken,
-      debug: input.debug,
-      logEvent: 'buy.route.fixed',
-    });
-    if (!topology) return null;
-
-    const descs: SwapDescLike[] = [];
-    let routeCurrentToken = input.currentToken;
-    if (routeCurrentToken.toLowerCase() !== topology.terminalQuoteToken.toLowerCase()) {
-      descs.push(await this.resolveRouteHopDesc({
-        chainId: input.chainId,
-        tokenIn: routeCurrentToken,
-        tokenOut: topology.terminalQuoteToken,
-        prefer: getBridgeTokenDexPreference(input.chainId as ChainId, topology.terminalQuoteToken) ?? null,
-      }));
-      routeCurrentToken = topology.terminalQuoteToken;
-    }
-
-    this.logFlapStocksRoute(input.debug, 'buy.route.fixed.apply', {
-      chainId: input.chainId,
-      depth: input.depth ?? 0,
-      currentToken: input.currentToken,
-      targetToken: input.targetToken,
-      terminalQuoteToken: topology.terminalQuoteToken,
-      rawQuotePoolAddress: topology.rawQuotePoolAddress,
-      rawQuotePoolPrefer: topology.rawQuotePoolPrefer ?? null,
-    });
-    this.logRoutePool(input.debug, 'buy.fixed.apply', {
-      chainId: input.chainId,
-      currentToken: input.currentToken,
-      targetToken: input.targetToken,
-      terminalQuoteToken: topology.terminalQuoteToken,
-      pool: topology.rawQuotePoolAddress,
-      preferHint: topology.rawQuotePoolPrefer ?? null,
-    });
-    descs.push(await this.resolveKnownPoolRouteDesc({
-      chainId: input.chainId,
-      tokenIn: routeCurrentToken,
-      tokenOut: input.targetToken,
-      poolAddress: topology.rawQuotePoolAddress,
-      preferHint: topology.rawQuotePoolPrefer,
-      debug: input.debug,
-    }));
-    return descs;
   }
 
   private static buildKnownLaunchpadBuyRouteDesc(input: {
@@ -3169,13 +4532,74 @@ export class TradeService {
       flap_outer_quote_is_stocks: enriched.flap_outer_quote_is_stocks ?? base.flap_outer_quote_is_stocks,
       flap_basket_token: enriched.flap_basket_token || base.flap_basket_token,
       flap_supported_assets: enriched.flap_supported_assets ?? base.flap_supported_assets,
+      pool_factory: enriched.pool_factory || base.pool_factory,
+      pool_exchange: enriched.pool_exchange || base.pool_exchange,
+      tpool_exchange: enriched.tpool_exchange || base.tpool_exchange,
+      tpool_launch_type: enriched.tpool_launch_type || base.tpool_launch_type,
       tokenPrice: base.tokenPrice ?? enriched.tokenPrice,
     };
+  }
+
+  private static hasMutilWindowRouteFields(chainId: number, tokenInfo: TokenInfo): boolean {
+    if (!supportsGmgnMutilWindowLineageChain(chainId)) return false;
+    const quote = resolveEvmGmgnDirectQuoteToken(chainId, tokenInfo);
+    if (!quote) return false;
+    if (isEvmInnerLaunchpadToken(chainId, tokenInfo)) return true;
+    if (chainId === ChainId.RH && this.rhV4PoolIdFromTokenInfo(tokenInfo)) return true;
+    const pool = this.getKnownDexPoolAddress(tokenInfo);
+    return !!pool;
+  }
+
+  /**
+   * Always merge GMGN /mutil_window_token_info (routing) + /multi_token_info (launchpad/tpool)
+   * before trade route build. Page tokenInfo alone is often missing tpool/launchpad fields.
+   */
+  private static async ensureMutilWindowTradeTokenInfo(
+    chainId: number,
+    tokenInfo: TokenInfo,
+    debug?: boolean,
+  ): Promise<TokenInfo> {
+    if (!supportsGmgnMutilWindowLineageChain(chainId)) return tokenInfo;
+
+    const chain = String(chainNames[chainId as ChainId] || '').trim().toLowerCase();
+    const tokenAddress = String(tokenInfo.address || '').trim();
+    if (!chain || !tokenAddress) return tokenInfo;
+
+    const enriched = await GmgnAPI.getTokenTradeInfo(chain, tokenAddress).catch(() => null);
+    if (!enriched) return tokenInfo;
+    const merged = this.mergeFlapTradeTokenInfo(tokenInfo, enriched);
+    if (debug) {
+      console.info('[trade.mutil_window.route][token_info.enriched]', {
+        chainId,
+        tokenAddress,
+        quote: merged.quote_token_address ?? null,
+        pool: merged.pool_pair ?? merged.biggest_pool_address ?? merged.tpool_pool_address ?? null,
+        launchpad: merged.launchpad ?? null,
+        launchpadPlatform: merged.launchpad_platform ?? null,
+        launchpadStatus: merged.launchpad_status ?? null,
+        tpoolLaunchType: merged.tpool_launch_type ?? null,
+        innerLaunchpad: isEvmInnerLaunchpadToken(chainId, merged),
+        hasRouteFields: this.hasMutilWindowRouteFields(chainId, merged),
+      });
+    }
+    return merged;
+  }
+
+  /** Skip on-chain Flap enrichment / legacy warm for generic GMGN outer tokens (e.g. DPAID). */
+  private static shouldSkipLegacyFlapPrewarmWarm(chainId: number, tokenInfo: TokenInfo): boolean {
+    if (!supportsGmgnMutilWindowLineageChain(chainId)) return false;
+    if (isEvmInnerLaunchpadToken(chainId, tokenInfo)) return false;
+    if (hasConfirmedFlapStocksIdentity(chainId, tokenInfo)) return false;
+    if (hasNonTerminalFlapOuterQuote(chainId, tokenInfo)) return false;
+    return true;
   }
 
   private static async ensureFlapTradeTokenInfo(chainId: number, tokenInfo: TokenInfo, debug?: boolean): Promise<TokenInfo> {
     const platform = resolveTradeLaunchpadPlatform(tokenInfo);
     if (!platform.startsWith('flap')) return tokenInfo;
+    if (this.shouldSkipLegacyFlapPrewarmWarm(chainId, tokenInfo)) {
+      return tokenInfo;
+    }
     const hasQuote = isAddressLike(tokenInfo.quote_token_address);
     const hasPool = !!(tokenInfo.pool_pair || tokenInfo.biggest_pool_address || tokenInfo.tpool_pool_address || tokenInfo.flap_v4_fee);
     if (hasQuote && hasPool) return tokenInfo;
@@ -3600,12 +5024,29 @@ export class TradeService {
     return isAddressLike(pancake) ? pancake as Address : undefined;
   }
 
+  /** Prefer mutil_window pool.factory, then exchange-derived factory, then chain default. */
+  private static resolveV3FactoryForPool(
+    chainId: number,
+    exchange?: string | null,
+    factoryHint?: Address | null,
+  ): Address | undefined {
+    if (factoryHint && this.isAllowedRouterV3Factory(chainId, factoryHint)) {
+      return factoryHint;
+    }
+    const exchangeRaw = String(exchange || '').trim();
+    if (/^0x[a-fA-F0-9]{40}$/.test(exchangeRaw) && this.isAllowedRouterV3Factory(chainId, exchangeRaw as Address)) {
+      return exchangeRaw as Address;
+    }
+    return this.inferV3Factory(chainId, exchange);
+  }
+
   private static async getKnownPoolRouteMeta(
     chainId: number,
     poolAddress: Address,
     preferHint?: 'v2' | 'v3' | null,
     feeHint?: number | null,
     dexType?: string | null,
+    v3FactoryHint?: Address | null,
   ): Promise<{ prefer: 'v2' | 'v3'; fee?: number; v3Factory?: Address } | null> {
     // Cache by pool only — same address must not flip V2/V3 across preferHint variants.
     const key = `${chainId}:${poolAddress.toLowerCase()}`;
@@ -3626,7 +5067,7 @@ export class TradeService {
             return {
               prefer: 'v3' as const,
               fee,
-              v3Factory: this.inferV3Factory(chainId, dexType),
+              v3Factory: this.resolveV3FactoryForPool(chainId, dexType, v3FactoryHint),
             };
           }
         } catch {
@@ -3648,7 +5089,7 @@ export class TradeService {
           return {
             prefer: 'v3' as const,
             fee,
-            v3Factory: this.inferV3Factory(chainId, dexType),
+            v3Factory: this.resolveV3FactoryForPool(chainId, dexType, v3FactoryHint),
           };
         }
         return { prefer: 'v2' as const };
@@ -3658,22 +5099,108 @@ export class TradeService {
     return await task;
   }
 
+  private static async tryResolveBnbInfinityHopDesc(input: {
+    tokenIn: Address;
+    tokenOut: Address;
+    poolId: string;
+  }): Promise<SwapDescLike | null> {
+    if (!isPancakeInfinityPoolId(input.poolId)) return null;
+    const poolKey = await readPancakeInfinityPoolKey(input.poolId).catch(() => null);
+    if (!poolKey) return null;
+    const quoteFromOut = infinityPoolQuoteRouterToken(poolKey, input.tokenOut);
+    const quoteFromIn = infinityPoolQuoteRouterToken(poolKey, input.tokenIn);
+    const matches = (
+      (quoteFromOut && this.isEquivalentFlapRouteToken(ChainId.BNB, quoteFromOut, input.tokenIn))
+      || (quoteFromIn && this.isEquivalentFlapRouteToken(ChainId.BNB, quoteFromIn, input.tokenOut))
+    );
+    if (!matches) return null;
+    return buildPancakeInfinityExactInDesc({
+      tokenIn: input.tokenIn,
+      tokenOut: input.tokenOut,
+      poolKey,
+    });
+  }
+
   private static async resolveKnownPoolRouteDesc(input: {
     chainId: number;
     tokenIn: Address;
     tokenOut: Address;
     poolAddress: Address;
-    preferHint?: 'v2' | 'v3' | null;
+    preferHint?: 'v2' | 'v3' | 'v4' | null;
     fee?: number | null;
     dexType?: string | null;
+    v3Factory?: Address | null;
     debug?: boolean;
   }): Promise<SwapDescLike> {
+    if (input.chainId === ChainId.BNB && isPancakeInfinityPoolId(input.poolAddress)) {
+      const infinityDesc = await this.tryResolveBnbInfinityHopDesc({
+        tokenIn: input.tokenIn,
+        tokenOut: input.tokenOut,
+        poolId: input.poolAddress,
+      });
+      if (infinityDesc) {
+        this.logRoutePool(input.debug, 'pool.desc', {
+          chainId: input.chainId,
+          tokenIn: input.tokenIn,
+          tokenOut: input.tokenOut,
+          pool: input.poolAddress,
+          preferHint: 'v4',
+          metaPrefer: 'v4',
+          fee: infinityDesc.fee,
+          swapType: infinityDesc.swapType,
+        });
+        return infinityDesc;
+      }
+      // bytes32 but not Pancake Infinity (e.g. openfour V4) — fall through to V2/V3
+      // meta resolution when preferHint allows it; lineage hops should use 20-byte
+      // pool.pool_address and never reach here.
+      if (input.preferHint === 'v4') {
+        throw new Error(`找不到 ${input.tokenIn}/${input.tokenOut} 的 V4 交易池`);
+      }
+    }
+    if (input.chainId === ChainId.RH && this.isRhV4PoolId(input.poolAddress)) {
+      const v4Key = await this.resolveRhV4PoolKey({
+        chainId: input.chainId,
+        tokenIn: input.tokenIn,
+        tokenOut: input.tokenOut,
+        poolId: input.poolAddress,
+        feeHint: input.fee,
+      });
+      if (this.isUsableRhV4PoolKey(v4Key)) {
+        const fee = this.pickRhV4Fee(v4Key.fee, input.fee);
+        const tickSpacing = (v4Key.tickSpacing && v4Key.tickSpacing > 0)
+          ? v4Key.tickSpacing
+          : this.v4TickSpacingForFee(fee > 0 ? fee : 3000);
+        const desc = this.buildRhV4MarketDesc({
+          tokenIn: input.tokenIn,
+          tokenOut: input.tokenOut,
+          fee,
+          tickSpacing,
+          hooks: v4Key.hooks,
+        });
+        this.logRoutePool(input.debug, 'pool.desc', {
+          chainId: input.chainId,
+          tokenIn: input.tokenIn,
+          tokenOut: input.tokenOut,
+          pool: input.poolAddress,
+          preferHint: 'v4',
+          metaPrefer: 'v4',
+          fee: desc.fee,
+          swapType: desc.swapType,
+        });
+        return desc;
+      }
+      if (input.preferHint === 'v4') {
+        throw new Error(`找不到 ${input.tokenIn}/${input.tokenOut} 的 RH V4 交易池`);
+      }
+    }
     const meta = await this.getKnownPoolRouteMeta(
       input.chainId,
       input.poolAddress,
-      input.preferHint,
+      input.preferHint === 'v3' ? 'v3' : input.preferHint === 'v2' ? 'v2' : null,
       input.fee,
       input.dexType,
+      input.v3Factory,
     );
     if (!meta) {
       throw new Error(`找不到 ${input.tokenIn}/${input.tokenOut} 的交易池`);
@@ -3716,11 +5243,54 @@ export class TradeService {
     return desc;
   }
 
+  private static async confirmV3DescFromPool(
+    chainId: number,
+    desc: SwapDescLike,
+  ): Promise<SwapDescLike | null> {
+    if (!desc.poolAddress || desc.poolAddress === ZERO_ADDRESS) return null;
+    try {
+      const client = await RpcService.getClient(chainId);
+      const feeRaw = await client.readContract({
+        address: desc.poolAddress as Address,
+        abi: poolV3Abi,
+        functionName: 'fee',
+      });
+      const fee = Number(feeRaw);
+      if (!Number.isFinite(fee) || fee <= 0) return null;
+      let poolManager = desc.poolManager && desc.poolManager !== ZERO_ADDRESS
+        ? desc.poolManager
+        : null;
+      if (!poolManager) {
+        const factoryRaw = await client.readContract({
+          address: desc.poolAddress as Address,
+          abi: poolV3Abi,
+          functionName: 'factory',
+        });
+        if (isAddressLike(factoryRaw)) {
+          poolManager = factoryRaw as Address;
+        }
+      }
+      if (poolManager && !this.isAllowedRouterV3Factory(chainId, poolManager)) {
+        throw new Error('该 V3 池不属于 Pancake/Uniswap，当前路由无法成交');
+      }
+      return {
+        ...desc,
+        fee,
+        poolManager: poolManager ?? desc.poolManager,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('不属于 Pancake/Uniswap')) throw error;
+      return null;
+    }
+  }
+
   private static async attachV3FactoriesToDescs(chainId: number, descs: SwapDescLike[]): Promise<SwapDescLike[]> {
     if (chainId === ChainId.RH) return descs;
-    return descs.map((desc) => {
+    return Promise.all(descs.map(async (desc) => {
       if (desc.swapType !== SwapType.V3_EXACT_IN) return desc;
       if (!desc.poolAddress || desc.poolAddress === ZERO_ADDRESS) return desc;
+      const confirmed = await this.confirmV3DescFromPool(chainId, desc);
+      if (confirmed) return confirmed;
       if (desc.poolManager && desc.poolManager !== ZERO_ADDRESS) {
         if (!this.isAllowedRouterV3Factory(chainId, desc.poolManager)) {
           throw new Error('该 V3 池不属于 Pancake/Uniswap，当前路由无法成交');
@@ -3733,7 +5303,7 @@ export class TradeService {
         throw new Error('该 V3 池不属于 Pancake/Uniswap，当前路由无法成交');
       }
       return { ...desc, poolManager: factory };
-    });
+    }));
   }
 
   private static isFlapOuterRouteTerminalToken(chainId: number, tokenAddress: Address): boolean {
@@ -3998,15 +5568,22 @@ export class TradeService {
     }
     if (!candidates.length) return null;
 
-    // Prefer stable terminals (USDT/USDC/…) over native/WBNB so catalog quotes like GMEB
-    // resolve as BNB→USDT→GMEB instead of a thin direct BNB pair.
-    const stableHomes = candidates.filter((item) => (
-      isTradeRouteTerminalQuote(input.chainId, item.counterparty)
-      && !isTradeRouteNativeToken(input.chainId, item.counterparty)
-    ));
-    const pool = (stableHomes.length ? stableHomes : candidates)
-      .slice()
-      .sort((a, b) => b.liquidityUsd - a.liquidityUsd)[0];
+    // Pick the deepest pool overall. Only swap to a stable bridge when the deepest
+    // counterparty is native (WBNB) — stable bridges (USDT/USDC) are less volatile
+    // than a thin BNB pair. Crucially, do NOT let stable bridges preempt non-terminal
+    // quote counterparties (BNCB/BNC4/…): those are the real base pools and must be
+    // recursed into via assembleBuyRouteViaDexHop so the lineage decomposes
+    // (BNB→USDT→BNC4→BNCB→ABS) on the first visit, not only after the quote token's
+    // own page is visited and cached.
+    const sorted = candidates.slice().sort((a, b) => b.liquidityUsd - a.liquidityUsd);
+    let pool = sorted[0];
+    if (pool && isTradeRouteNativeToken(input.chainId, pool.counterparty)) {
+      const stableAlt = sorted.find((item) => (
+        isTradeRouteTerminalQuote(input.chainId, item.counterparty)
+        && !isTradeRouteNativeToken(input.chainId, item.counterparty)
+      ));
+      if (stableAlt) pool = stableAlt;
+    }
     if (!pool) return null;
 
     this.logRoutePool(input.debug, 'dex.home.selected', {
@@ -4016,7 +5593,8 @@ export class TradeService {
       pool: pool.poolAddress,
       liquidityUsd: pool.liquidityUsd,
       homeIsTerminal: isTradeRouteTerminalQuote(input.chainId, pool.counterparty),
-      preferredStableHome: stableHomes.length > 0,
+      preferredStableHome: isTradeRouteNativeToken(input.chainId, pool.counterparty)
+        && pool.counterparty !== sorted[0]?.counterparty,
     });
     return pool;
   }
@@ -4407,6 +5985,8 @@ export class TradeService {
 
   private static getKnownDexPoolAddress(tokenInfo?: Partial<Pick<TokenInfo, 'address' | 'pool_pair' | 'biggest_pool_address' | 'tpool_pool_address' | 'launchpad' | 'launchpad_platform' | 'launchpad_status'>> | null): Address | null {
     const launchpadPlatform = tokenInfo ? resolveTradeLaunchpadPlatform(tokenInfo as TokenInfo) : '';
+    // Genius outer pools are Pancake Infinity; GMGN biggest_pool_address is a poolId, not a pair.
+    if (isGeniusPlatform(launchpadPlatform)) return null;
     const preferBiggestFirst = Number(tokenInfo?.launchpad_status ?? 0) === 1
       && typeof launchpadPlatform === 'string'
       && launchpadPlatform.toLowerCase().startsWith('flap');
@@ -4424,7 +6004,9 @@ export class TradeService {
       ];
     const picked = (() => {
       for (const candidate of candidates) {
-        if (this.isRhV4PoolId(candidate)) return candidate as Address;
+        // This helper only returns 20-byte pair addresses for V2/V3.
+        // bytes32 Infinity/V4 poolIds are resolved elsewhere (BNB Infinity / RH V4).
+        if (isPancakeInfinityPoolId(candidate) || this.isRhV4PoolId(candidate)) continue;
         if (this.isFlapCompatPoolAddress(candidate)) continue;
         if (tokenAddress) {
           if (isUsableFlapDexPoolAddress(tokenAddress, candidate)) return candidate as Address;
@@ -4437,9 +6019,14 @@ export class TradeService {
     return picked;
   }
 
-  private static logFlapStocksRoute(debug: boolean | undefined, event: string, payload: Record<string, unknown>) {
+  private static logTradeRouteDebug(debug: boolean | undefined, event: string, payload: Record<string, unknown>) {
     if (!debug) return;
-    console.info(`[trade.flapstocks.route][${event}]`, payload);
+    console.info(`[trade.route][${event}]`, payload);
+  }
+
+  /** @deprecated Use logTradeRouteDebug */
+  private static logFlapStocksRoute(debug: boolean | undefined, event: string, payload: Record<string, unknown>) {
+    this.logTradeRouteDebug(debug, event, payload);
   }
 
   private static logRoutePool(debug: boolean | undefined, event: string, payload: Record<string, unknown>) {
@@ -4475,6 +6062,10 @@ export class TradeService {
   private static reverseSwapType(swapType: number): number {
     if (swapType === SwapType.FOUR_MEME_BUY_AMAP) return SwapType.FOUR_MEME_SELL;
     if (swapType === SwapType.FOUR_MEME_SELL) return SwapType.FOUR_MEME_BUY_AMAP;
+    if (swapType === SwapType.GENIUS_BUY) return SwapType.GENIUS_SELL;
+    if (swapType === SwapType.GENIUS_SELL) return SwapType.GENIUS_BUY;
+    if (swapType === HyperSwapType.HYPER_ZAP_BUY) return HyperSwapType.HYPER_ZAP_SELL;
+    if (swapType === HyperSwapType.HYPER_ZAP_SELL) return HyperSwapType.HYPER_ZAP_BUY;
     if (swapType === RhSwapType.PONS_V2_BUY) return RhSwapType.PONS_V2_SELL;
     if (swapType === RhSwapType.PONS_V2_SELL) return RhSwapType.PONS_V2_BUY;
     return swapType;
@@ -4498,7 +6089,14 @@ export class TradeService {
     let data = desc.data;
     if (desc.swapType === SwapType.OPEN_FOUR_EXACT_IN) {
       data = this.reverseOpenFourSwapData(desc.data);
-    } else if (desc.swapType === SwapType.FOUR_MEME_BUY_AMAP || desc.swapType === SwapType.FOUR_MEME_SELL) {
+    } else if (
+      desc.swapType === SwapType.FOUR_MEME_BUY_AMAP
+      || desc.swapType === SwapType.FOUR_MEME_SELL
+      || desc.swapType === SwapType.GENIUS_BUY
+      || desc.swapType === SwapType.GENIUS_SELL
+      || desc.swapType === HyperSwapType.HYPER_ZAP_BUY
+      || desc.swapType === HyperSwapType.HYPER_ZAP_SELL
+    ) {
       data = '0x';
     }
     return {
@@ -4751,6 +6349,7 @@ export class TradeService {
     chainId: number;
     currentToken: Address;
     targetToken: Address;
+    lineageRootToken?: Address;
     visited?: Set<string>;
     debug?: boolean;
     depth?: number;
@@ -4762,6 +6361,19 @@ export class TradeService {
     const debug = input.debug === true;
     const depth = input.depth ?? 0;
     if (this.isEquivalentFlapRouteToken(chainId, currentToken, targetToken)) return [];
+
+    // GMGN lineage beats outer-market slice cache — stale dexHome routes must not
+    // win over authoritative multi-hop quote chains seeded from the page walk.
+    if (supportsGmgnMutilWindowLineageChain(chainId)) {
+      const gmgnFirst = await this.tryBuildGmgnLineageOuterBuyRoute({
+        chainId,
+        currentToken,
+        targetToken,
+        lineageRootToken: input.lineageRootToken,
+        debug,
+      });
+      if (gmgnFirst?.length) return gmgnFirst;
+    }
 
     const sliced = sliceOuterMarketRoute(chainId, currentToken, targetToken);
     if (sliced) {
@@ -4839,10 +6451,28 @@ export class TradeService {
       })];
     }
 
+    // Infinity poolId targets (GENIUS etc.) before DexScreener USDT homes.
+    const infinityRoute = await this.tryBuildBnbInfinityOuterBuyRoute({
+      chainId,
+      currentToken,
+      targetToken,
+      debug,
+    }).catch(() => null);
+    if (infinityRoute?.length) return infinityRoute;
+
     // Catalog quote assets (GMEB/ASTER/…) are outer-market hops — DexScreener home,
     // not Flap launchpad identity. Skipping identity avoids slow/wrong official lineage.
     const isCatalogQuoteAsset = !!getKnownQuoteTokenSymbol(chainId, targetToken);
-    if (isCatalogQuoteAsset && isTradeRouteNativeToken(chainId, currentToken)) {
+    // Non-terminal quote tokens (e.g. BNCB whose quote is BNC4, BNC4 whose quote is USDT)
+    // must be resolved by recursing through their own quote lineage (dexHome / marketRoute
+    // below), NOT by a direct stable→target pool. Otherwise the first visit to a token
+    // whose base is a non-terminal quote (e.g. ABS whose base is BNCB) would get a
+    // shallow direct route (BNB→USDT→BNCB) instead of the decomposed lineage
+    // (BNB→USDT→BNC4→BNCB), and only show the correct route after the quote token's
+    // own page was visited and cached.
+    const isCatalogQuoteTerminal = isCatalogQuoteAsset
+      && !this.isNonTerminalQuoteToken(chainId, targetToken);
+    if (isCatalogQuoteTerminal && isTradeRouteNativeToken(chainId, currentToken)) {
       const stables = getTradeRouteStableAddresses(chainId)
         .filter((item) => item.toLowerCase() !== targetToken.toLowerCase()) as Address[];
       for (const stable of stables) {
@@ -4915,6 +6545,56 @@ export class TradeService {
         officialQuote,
       });
       // Fall through to DexScreener / market home — do not abort the whole prefix.
+    }
+
+    // Declared quote lineage fallback: for targets whose raw quote_token_address is
+    // itself a non-terminal token (e.g. BNCB → BNC4, GSTOCK → BNCB, ABS → BNCB),
+    // recurse through the declared quote BEFORE falling back to dexHome. dexHome
+    // picks the deepest DexScreener pool, which for a 4Stock token is often a
+    // direct USDT pool — that yields a shallow route (BNB→USDT→BNCB) and skips
+    // the token's real quote lineage (BNB→USDT→BNC4→BNCB). Using the declared
+    // quote here makes the first visit to a token whose base is a non-terminal
+    // quote (e.g. ABS→BNCB→BNC4→USDT) decompose fully without needing the quote
+    // token's own page to be cached first. BSC-only (4Stock is BSC-only);
+    // tokenInfo fetch is cached per (chain,token) and the resulting route is
+    // cached via the outer-market route cache, so subsequent visits are free.
+    if (!officialQuote && chainId === ChainId.BNB) {
+      const declaredQuoteToken = await this.resolveDeclaredQuoteLineageQuote(chainId, targetToken, debug);
+      if (
+        declaredQuoteToken
+        && !this.isEquivalentFlapRouteToken(chainId, currentToken, declaredQuoteToken)
+        && !this.isEquivalentFlapRouteToken(chainId, targetToken, declaredQuoteToken)
+        && this.isNonTerminalQuoteToken(chainId, declaredQuoteToken)
+      ) {
+        const declaredRoute = await this.buildOfficialQuoteLineageRoute({
+          chainId,
+          currentToken,
+          targetToken,
+          officialQuote: declaredQuoteToken,
+          visited,
+          debug,
+          depth,
+          amountIn: input.amountIn,
+        }).catch(() => null);
+        if (declaredRoute?.length) {
+          this.logRoutePool(debug, 'buy.branch', {
+            chainId,
+            currentToken,
+            targetToken,
+            branch: 'declared_lineage',
+            officialQuote: declaredQuoteToken,
+            hops: this.summarizeRouteDescs(declaredRoute),
+          });
+          return declaredRoute;
+        }
+        this.logRoutePool(debug, 'buy.declared.miss', {
+          chainId,
+          currentToken,
+          targetToken,
+          declaredQuote: declaredQuoteToken,
+        });
+        // Fall through to dexHome / market home.
+      }
     }
 
     const dexHome = await this.resolveTokenDeepestDexHome({
@@ -5234,8 +6914,18 @@ export class TradeService {
 
   private static resolveConfiguredBaseTokenAddress(chainId: number, settings: { tradeBaseToken?: string; chains?: Record<number, { tradeBaseToken?: string }> }): Address {
     const runtime = getChainRuntime(chainId);
-    const tradeBaseToken = String(settings.chains?.[chainId]?.tradeBaseToken ?? settings.tradeBaseToken ?? 'BNB').toUpperCase();
-    if (tradeBaseToken === 'WBNB') return runtime.wrappedNativeAddress as Address;
+    const nativeSymbol = getNativeSymbol(chainId).toUpperCase();
+    const tradeBaseToken = String(
+      settings.chains?.[chainId]?.tradeBaseToken
+      ?? settings.tradeBaseToken
+      ?? nativeSymbol,
+    ).toUpperCase();
+    if (tradeBaseToken === 'WBNB' || tradeBaseToken === 'WETH' || tradeBaseToken === `W${nativeSymbol}`) {
+      return runtime.wrappedNativeAddress as Address;
+    }
+    if (tradeBaseToken === nativeSymbol || tradeBaseToken === 'BNB' || tradeBaseToken === 'ETH' || tradeBaseToken === 'SOL') {
+      return ZERO_ADDRESS;
+    }
     if (tradeBaseToken === 'USDC') {
       const usdc = USDC[chainId as keyof typeof USDC]?.address;
       if (usdc) return usdc as Address;
@@ -5282,13 +6972,17 @@ export class TradeService {
       }
     }
     if (!tokenInfo) throw new Error('Token info required');
-    tokenInfo = await this.ensureFlapTradeTokenInfo(input.chainId, tokenInfo, settings.ui?.consoleLogsEnabled === true);
+    const consoleLogsEnabled = settings.ui?.consoleLogsEnabled === true;
+    tokenInfo = await this.ensureMutilWindowTradeTokenInfo(input.chainId, tokenInfo, consoleLogsEnabled);
+    tokenInfo = await this.ensureFlapTradeTokenInfo(input.chainId, tokenInfo, consoleLogsEnabled);
     input.tokenInfo = tokenInfo;
+    if (input.gmgnQuoteLineage?.length) {
+      this.seedGmgnQuoteLineageCache(input.chainId, input.gmgnQuoteLineage);
+    }
     const baseTokenSymbol = this.resolveBaseTokenSymbol(input.chainId, baseTokenAddress);
     const baseFee = input.poolFee ?? 2500;
     const executionMode = input.executionModeOverride ?? settings.chains[input.chainId]?.executionMode ?? 'default';
     const isTurbo = executionMode === 'turbo';
-    const consoleLogsEnabled = settings.ui?.consoleLogsEnabled === true;
     if (isTurbo) {
       const reusedPrewarm = this.turboPrewarmInFlight.has(this.makeTurboWarmKey({
         chainId: input.chainId,
@@ -5340,16 +7034,28 @@ export class TradeService {
       const launchpadPlatform = launchpadRoute.platform;
       const isHyperAltfun = launchpadRoute.isHyperAltfun;
       const isPons = launchpadRoute.isPons;
+      const isGeniusCandidate = launchpadRoute.isGenius;
       const isInner = launchpadRoute.isInner;
-    const launchpadConfig = isInner ? this.getLaunchpadConfig(tokenInfo, input.chainId, openFourRuntime) : null;
-    const isPonsInner = isPons && isInner;
+    const geniusState = isGeniusCandidate
+      ? await timeStep('genius:state', () => getGeniusTradeState(tokenOut, { force: runtimeOpts?.forceRefreshHyperState === true }))
+      : null;
+    if (isGeniusCandidate && geniusState && !geniusState.tradeable) {
+      if (geniusState.phase === 1) throw new Error('Genius 代币正在毕业，请稍后再试');
+      if (geniusState.phase === 3) throw new Error('Genius 代币已下架，无法交易');
+    }
+    const isInnerEffective = geniusState ? geniusState.isInner : isInner;
+    const launchpadConfig = isInnerEffective ? this.getLaunchpadConfig(tokenInfo, input.chainId, openFourRuntime) : null;
+    const isPonsInner = isPons && isInnerEffective;
+    // Only use the Genius curve/Infinity path when the factory confirms the launch.
+    // GMGN may tag related tokens (e.g. GENIUS-quoted pools) as geniusfun without a factory record.
+    const isGeniusDedicated = !!geniusState?.tradeable && isGeniusCandidate;
 
-    const bridgeToken = (isHyperAltfun || isPonsInner)
+    const bridgeToken = (isHyperAltfun || isPonsInner || isGeniusDedicated)
       ? null
       : this.getLaunchpadQuoteRouterToken(input.chainId, tokenInfo, launchpadPlatform, openFourRuntime, {
         preferRuntimeQuote: usesOpenFourRuntime(launchpadPlatform),
       });
-    const rawQuoteToken = (isHyperAltfun || isPonsInner)
+    const rawQuoteToken = (isHyperAltfun || isPonsInner || isGeniusDedicated)
       ? null
       : await this.resolveTradeRouteQuoteToken({
         chainId: input.chainId,
@@ -5361,16 +7067,33 @@ export class TradeService {
         debug: consoleLogsEnabled,
       });
     const nativeToQuoteSwapEnabled = tokenInfo.nativeToQuoteSwapEnabled === true;
-    const preparedRoute = (isHyperAltfun || isPonsInner)
-      ? null
-      : await timeStep('route:prepare', () => this.prepareEvmTradeRoute({
+    // Genius and Pons inner now have unified prepared routes
+    // (buildGeniusPreparedRoute / buildPonsPreparedRoute), so they reuse
+    // prepareEvmTradeRoute like every other EVM token — execution consumes
+    // preparedSplit instead of rebuilding the route. Only HyperAltfun (HYPER)
+    // still rebuilds, since prepareEvmTradeRoute does not yet produce its
+    // platform-specific final hop.
+    const preparedRoute = await timeStep('route:prepare', () =>
+      this.resolveBuyPreparedRoute({
         chainId: input.chainId,
         tokenAddress: tokenOut,
         tokenInfo,
         baseTokenAddress,
-      }));
-    if (!isHyperAltfun && !isPonsInner && !preparedRoute?.descs.length) {
+        storedDescs: input.preparedRouteDescs,
+        prepareBudgetMs: 15_000,
+      })
+    );
+    if (!isHyperAltfun && !isPonsInner && !isGeniusDedicated && !preparedRoute?.descs.length) {
       throw new Error('官方报价路径尚未就绪，请稍后再试');
+    }
+    if (isGeniusDedicated && !preparedRoute?.descs.length) {
+      throw new Error('Genius 路由尚未就绪，请稍后再试');
+    }
+    if (isPonsInner && !preparedRoute?.descs.length) {
+      throw new Error('Pons 路由尚未就绪，请稍后再试');
+    }
+    if (isHyperAltfun && !preparedRoute?.descs.length) {
+      throw new Error('alt.fun 路由尚未就绪，请稍后再试');
     }
     if (input.chainId === ChainId.RH && this.hasUnusableRhV4Fee(preparedRoute?.descs)) {
       throw new Error('RH Uniswap V4 pool fee 未就绪，请稍后重试');
@@ -5380,13 +7103,54 @@ export class TradeService {
     let currentRouterToken: Address = baseTokenAddress;
     let currentAmount = amountIn;
     let minOut = 0n;
+    let quotedOutWei = 0n;
 
-    if (isPonsInner) {
+    const preparedExec = preparedRoute
+      ? await this.tryAppendPreparedDexExecutionRoute({
+        side: 'buy',
+        chainId: input.chainId,
+        preparedRoute,
+        amountIn,
+        memeTokenAddress: tokenOut,
+        tokenInfo,
+        baseTokenAddress,
+        isTurbo,
+        slippageBps: getSlippageBps(settings, input.chainId, input.slippageBps),
+        poolFee: input.poolFee,
+        descs,
+        timeStep,
+        debug: consoleLogsEnabled,
+      })
+      : null;
+    const usedPreparedTopology = !!preparedExec;
+    if (preparedExec) {
+      minOut = preparedExec.minOut;
+      quotedOutWei = preparedExec.quotedOutWei;
+    } else if (isPonsInner) {
       const ponsState = await timeStep('pons:state', () => getPonsTradeState(tokenOut, { force: runtimeOpts?.forceRefreshHyperState === true }));
       if (!ponsState?.tradeable) throw new Error('该代币不是可交易的 pons 代币');
 
       const routeQuoteToken = ponsState.quoteRouterToken;
-      if (currentRouterToken.toLowerCase() !== routeQuoteToken.toLowerCase()) {
+      // Reuse the unified prepared route (buildPonsPreparedRoute — the same
+      // source the UI preview uses). Take the bridge prefix descs as-is and
+      // only re-quote them with the real amount; the final Pons hop is rebuilt
+      // with the real minOut (encoded into the desc's data, cannot be patched
+      // in place). Fall back to appendRhRouterBridgeHops only when the prepared
+      // route has no bridge prefix (start == quote, no bridge needed).
+      if (preparedSplit?.quoteDescs.length) {
+        descs.push(...(this.cloneSwapDescLikeArray(preparedSplit.quoteDescs) ?? []));
+        if (!isTurbo) {
+          for (const desc of preparedSplit.quoteDescs) {
+            currentAmount = await timeStep('quote:pons:bridge', () =>
+              this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+            );
+            if (currentAmount <= 0n) throw new Error('Pons 报价资产桥接报价失败');
+          }
+        } else {
+          currentAmount = 1n;
+        }
+        currentRouterToken = routeQuoteToken;
+      } else if (currentRouterToken.toLowerCase() !== routeQuoteToken.toLowerCase()) {
         currentAmount = await this.appendRhRouterBridgeHops({
           chainId: input.chainId,
           tokenIn: currentRouterToken,
@@ -5405,6 +7169,7 @@ export class TradeService {
       const allowUnquotedOuter = ponsState.version === 2 && ponsState.isOuter;
       if (!isTurbo && estimatedOut <= 0n && !allowUnquotedOuter) throw new Error('pons 买入报价失败');
       if (estimatedOut > 0n) {
+        quotedOutWei = estimatedOut;
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         minOut = applySlippage(estimatedOut, slippageBps);
       }
@@ -5413,12 +7178,73 @@ export class TradeService {
         tokenOut,
         minOut,
       }));
+    } else if (isGeniusDedicated && geniusState) {
+      // Reuse the unified prepared route (buildGeniusPreparedRoute — the same
+      // source the UI preview uses). Take the bridge prefix descs as-is and only
+      // re-quote them with the real amount; the final Genius hop is rebuilt with
+      // the real minOut (it is encoded into the desc's data, so it cannot be
+      // patched in place).
+      const routeQuoteToken = geniusState.quoteRouterToken;
+      if (preparedSplit?.quoteDescs.length) {
+        descs.push(...(this.cloneSwapDescLikeArray(preparedSplit.quoteDescs) ?? []));
+        if (!isTurbo) {
+          for (const desc of preparedSplit.quoteDescs) {
+            currentAmount = await timeStep('quote:genius:bridge', () =>
+              this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+            );
+            if (currentAmount <= 0n) throw new Error('Genius 报价资产桥接报价失败');
+          }
+        } else {
+          currentAmount = 1n;
+        }
+        currentRouterToken = routeQuoteToken;
+      }
+
+      if (!isTurbo) {
+        const quoted = await timeStep('quote:genius:buy', () => quoteGeniusBuyDetailed(tokenOut, currentAmount));
+        if (!quoted || quoted.tokensOut <= 0n) throw new Error('Genius 买入报价失败');
+        quotedOutWei = quoted.tokensOut;
+        const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
+        minOut = geniusState.isInner
+          ? applyGeniusBuySlippage(currentAmount, quoted, slippageBps)
+          : applySlippage(quoted.tokensOut, slippageBps);
+      }
+      descs.push(buildGeniusBuyDesc({
+        state: geniusState,
+        tokenOut,
+        minOut,
+      }));
     } else if (isHyperAltfun) {
       const hyperState = await timeStep('hyper:state', () => getHyperTradeState(tokenOut, { force: runtimeOpts?.forceRefreshHyperState === true }));
       if (!hyperState.isInner && !hyperState.isOuter) throw new Error('该代币不是有效的 alt.fun Hyper 代币');
 
       const routeBridgeToken = getHyperUsdcAddress();
-      if (currentRouterToken.toLowerCase() !== routeBridgeToken.toLowerCase()) {
+      // Reuse the unified prepared route (buildHyperPreparedRoute — the same
+      // source the UI preview uses). Take the bridge prefix descs as-is, only
+      // re-quote them with the real amount, and convert to Hyper swap types;
+      // the final HYPER_ZAP_BUY hop is rebuilt with the real minOut (encoded
+      // into the desc's data, cannot be patched in place). Fall back to a
+      // direct resolveBridgeHopExactIn only when the prepared route has no
+      // bridge prefix (start == USDC, no bridge needed).
+      if (preparedSplit?.quoteDescs.length) {
+        for (const desc of preparedSplit.quoteDescs) {
+          descs.push({
+            ...desc,
+            swapType: toHyperDexSwapType(desc.swapType as SwapType),
+          });
+        }
+        if (!isTurbo) {
+          for (const desc of preparedSplit.quoteDescs) {
+            currentAmount = await timeStep('quote:hyper:bridge', () =>
+              this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+            );
+            if (currentAmount <= 0n) throw new Error(`找不到 ${baseTokenSymbol}/USDC 的 Hyper 桥接交易池`);
+          }
+        } else {
+          currentAmount = 1n;
+        }
+        currentRouterToken = routeBridgeToken;
+      } else if (currentRouterToken.toLowerCase() !== routeBridgeToken.toLowerCase()) {
         const bridgePrefer = getBridgeTokenDexPreference(input.chainId as ChainId, routeBridgeToken);
         const q1 = await timeStep('quote:hyper:bridge', () =>
           resolveBridgeHopExactIn(
@@ -5472,6 +7298,7 @@ export class TradeService {
         : await timeStep('quote:hyper:zap:buy', () => quoteHyperBuyFromUsdc(tokenOut, currentAmount));
       if (!isTurbo && estimatedOut <= 0n) throw new Error('alt.fun 买入报价失败');
       if (estimatedOut > 0n) {
+        quotedOutWei = estimatedOut;
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         minOut = applySlippage(estimatedOut, slippageBps);
       }
@@ -5490,47 +7317,74 @@ export class TradeService {
       const turboRouteMode = isTurbo && !preferExactQuoteForStocks;
 
       if (bridgeToken && currentRouterToken.toLowerCase() !== bridgeToken.toLowerCase() && !needsStocksQuoteRoute) {
-        // Hop 1: [BaseToken] -> [Quote]
+        // Hop 1: [BaseToken] -> [Quote]. Prefer the unified prepared bridge prefix
+        // (the same descs the UI preview uses) so execution and preview never
+        // diverge and no redundant pool-resolution RPC fires at click time.
+        // Fall back to direct resolveBridgeHopExactIn only when prepared has none.
         const bridgePrefer = getBridgeTokenDexPreference(input.chainId as ChainId, bridgeToken);
         const needAmountOut = !turboRouteMode;
-        const q1 = await timeStep('quote:bridge', () =>
-          resolveBridgeHopExactIn(
-            input.chainId,
-            currentRouterToken,
-            bridgeToken,
-            currentAmount,
-            bridgePrefer,
-            turboRouteMode,
-            needAmountOut
-          )
-        );
-        if (turboRouteMode) {
-          if (!q1.poolAddress || q1.poolAddress === ZERO_ADDRESS) {
-            throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+        const preparedBridge = preparedSplit?.quoteDescs.length ? preparedSplit.quoteDescs : null;
+        if (preparedBridge) {
+          for (const desc of preparedBridge) {
+            if (!turboRouteMode) {
+              const out = await timeStep('quote:bridge', () =>
+                this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+              );
+              if (out <= 0n) {
+                throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+              }
+              currentAmount = out;
+            } else {
+              currentAmount = 1n;
+            }
+            descs.push({
+              ...desc,
+              swapType: input.chainId === ChainId.RH ? toRhDexSwapType(desc.swapType as SwapType) : desc.swapType,
+            });
           }
+          currentRouterToken = bridgeToken;
         } else {
-          try {
-            assertDexQuoteOk(q1);
-          } catch {
-            throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+          const q1 = await timeStep('quote:bridge', () =>
+            resolveBridgeHopExactIn(
+              input.chainId,
+              currentRouterToken,
+              bridgeToken,
+              currentAmount,
+              bridgePrefer,
+              turboRouteMode,
+              needAmountOut
+            )
+          );
+          if (turboRouteMode) {
+            if (!q1.poolAddress || q1.poolAddress === ZERO_ADDRESS) {
+              throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+            }
+          } else {
+            try {
+              assertDexQuoteOk(q1);
+            } catch {
+              throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+            }
+            if (q1.amountOut <= 0n) {
+              throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+            }
           }
-          if (q1.amountOut <= 0n) {
-            throw new Error(`找不到 ${baseTokenSymbol}/Quote 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
-          }
+          descs.push(getRouterSwapDesc({
+            swapType: input.chainId === ChainId.RH ? toRhDexSwapType(q1.swapType) : q1.swapType,
+            tokenIn: currentRouterToken,
+            tokenOut: bridgeToken,
+            poolAddress: q1.poolAddress,
+            fee: getV3FeeForDesc(q1, getDefaultBridgeV3Fee(input.chainId)),
+          }));
+          currentRouterToken = bridgeToken;
+          currentAmount = turboRouteMode ? 1n : q1.amountOut;
         }
-        descs.push(getRouterSwapDesc({
-          swapType: input.chainId === ChainId.RH ? toRhDexSwapType(q1.swapType) : q1.swapType,
-          tokenIn: currentRouterToken,
-          tokenOut: bridgeToken,
-          poolAddress: q1.poolAddress,
-          fee: getV3FeeForDesc(q1, getDefaultBridgeV3Fee(input.chainId)),
-        }));
-        currentRouterToken = bridgeToken;
-        currentAmount = turboRouteMode ? 1n : q1.amountOut;
       }
 
       // Hop 2: [BaseToken/Quote] -> Meme
-      if (isInner && launchpadConfig) {
+      if (this.shouldUseInnerLaunchpadHop(tokenInfo, isInnerEffective, launchpadConfig)) {
+        const innerLaunchpadConfig = launchpadConfig;
+        if (!innerLaunchpadConfig) throw new Error('Launchpad config required');
         const platform = launchpadPlatform;
         let dataForDesc: `0x${string}` = '0x';
         let feeForDesc = 0;
@@ -5546,6 +7400,7 @@ export class TradeService {
                 tryFourMemeBuyEstimatedAmount(client, input.chainId, tokenOut, fundsForEstimate)
               );
               if (est && est.estimatedAmount > 0n) {
+                quotedOutWei = est.estimatedAmount;
                 const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
                 minAmount = applySlippage(est.estimatedAmount, slippageBps);
               }
@@ -5584,6 +7439,7 @@ export class TradeService {
               )
             );
             if (!est || est.tokenAmount <= 0n) throw new Error('OpenFour 买入预估失败或当前不可交易');
+            quotedOutWei = est.tokenAmount;
             const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
             minOut = applySlippage(est.tokenAmount, slippageBps);
           }
@@ -5600,67 +7456,61 @@ export class TradeService {
           && !isFlapStocks
           && !isOpenFourPlatform(platform);
         if (needsStocksQuoteRoute && rawQuoteToken && !skipNativeQuoteShortcut) {
-            const quoteRouteDescs = preparedSplit?.quoteDescs.length
-              ? preparedSplit.quoteDescs
-              : await timeStep('quote:flapstocks:buy:route', () =>
-                this.buildOuterMarketBuyQuoteRoute({
-                  chainId: input.chainId,
-                  currentToken: currentRouterToken,
-                  targetToken: rawQuoteToken,
-                  debug: consoleLogsEnabled,
-                  amountIn: currentAmount,
-                })
-              );
-            if (!quoteRouteDescs?.length) {
-              throw new Error(`找不到 ${baseTokenSymbol}/Quote 的交易路径，无法完成买入预处理`);
+            if (!preparedSplit?.quoteDescs.length) {
+              throw new Error(`找不到 ${baseTokenSymbol}/Quote 的交易路径，请等待路由刷新`);
             }
-            descs.push(...quoteRouteDescs);
+            for (const desc of preparedSplit.quoteDescs) {
+              if (!turboRouteMode) {
+                const out = await timeStep('quote:prepared:prefix', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+                );
+                if (out <= 0n) {
+                  throw new Error(`找不到 ${baseTokenSymbol}/Quote 的交易路径，请等待路由刷新`);
+                }
+                currentAmount = out;
+              } else {
+                currentAmount = 1n;
+              }
+              descs.push({
+                ...desc,
+                swapType: input.chainId === ChainId.RH ? toRhDexSwapType(desc.swapType as SwapType) : desc.swapType,
+              });
+            }
             currentRouterToken = rawQuoteToken;
-            currentAmount = 1n;
         }
 
         descs.push(getRouterSwapDesc({
-          swapType: launchpadConfig.buyType,
+          swapType: innerLaunchpadConfig.buyType,
           tokenIn: rawQuoteToken ?? currentRouterToken,
           tokenOut,
-          poolAddress: launchpadConfig.manager,
+          poolAddress: innerLaunchpadConfig.manager,
           fee: feeForDesc,
           tickSpacing: tickSpacingForDesc,
           data: dataForDesc,
         }));
       } else {
-        if (needsStocksQuoteRoute && rawQuoteToken) {
-          this.logFlapStocksRoute(consoleLogsEnabled, 'buy.outer.start', {
-            chainId: input.chainId,
-            tokenAddress: tokenOut,
-            baseTokenAddress: currentRouterToken,
-            rawQuoteToken,
-            launchpadPlatform,
-            launchpadStatus: tokenInfo.launchpad_status ?? null,
-            launchType: tokenInfo.tpool_launch_type ?? null,
-            targetPoolPair: tokenInfo.pool_pair ?? null,
-            targetBiggestPoolAddress: tokenInfo.biggest_pool_address ?? null,
-            targetTpoolPoolAddress: tokenInfo.tpool_pool_address ?? null,
-            executionMode,
-          });
-          const quoteRouteDescs = preparedSplit?.quoteDescs.length
-            ? preparedSplit.quoteDescs
-            : await timeStep('quote:flapstocks:outer:buy:route', () =>
-              this.buildOuterMarketBuyQuoteRoute({
-                chainId: input.chainId,
-                currentToken: currentRouterToken,
-                targetToken: rawQuoteToken,
-                debug: consoleLogsEnabled,
-                amountIn: currentAmount,
-              })
-            );
-          if (!quoteRouteDescs?.length) {
-            throw new Error(`找不到 ${baseTokenSymbol}/Flap Quote 的交易路径，当前 flap_stock 无法完成买入预处理`);
+          if (preparedSplit?.quoteDescs.length) {
+            for (const desc of preparedSplit.quoteDescs) {
+              if (!turboRouteMode) {
+                const out = await timeStep('quote:prepared:prefix', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, currentAmount)
+                );
+                if (out <= 0n) {
+                  throw new Error('官方报价路径尚未就绪，请稍后再试');
+                }
+                currentAmount = out;
+              } else {
+                currentAmount = 1n;
+              }
+              descs.push({
+                ...desc,
+                swapType: input.chainId === ChainId.RH ? toRhDexSwapType(desc.swapType as SwapType) : desc.swapType,
+              });
+            }
+            currentRouterToken = preparedSplit.quoteDescs[preparedSplit.quoteDescs.length - 1].tokenOut as Address;
+          } else if (needsStocksQuoteRoute && rawQuoteToken) {
+            throw new Error('官方报价路径尚未就绪，请稍后再试');
           }
-          descs.push(...quoteRouteDescs);
-          currentRouterToken = rawQuoteToken;
-          currentAmount = 1n;
-        }
 
           const preparedV4LastHop = this.takePreparedV4LastHop(preparedSplit, false, input.chainId);
           if (preparedV4LastHop) {
@@ -5699,6 +7549,7 @@ export class TradeService {
                 )
               );
               if (q2.amountOut > 0n) {
+                quotedOutWei = q2.amountOut;
                 const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
                 minOut = applySlippage(q2.amountOut, slippageBps);
               } else {
@@ -5716,7 +7567,12 @@ export class TradeService {
     }
 
     const deadline = getDeadline(settings, input.chainId, input.deadlineSeconds);
-    const routedDescs = await this.attachV3FactoriesToDescs(input.chainId, descs);
+    const routedDescs = this.alignNativePaymentTokenIn(
+      input.chainId,
+      await this.attachV3FactoriesToDescs(input.chainId, descs),
+      baseTokenAddress,
+    );
+    if (!routedDescs.length) throw new Error('买入路由尚未就绪，请稍后再试');
 
     const data = encodeFunctionData({
       abi: dagobangAbi,
@@ -5796,7 +7652,7 @@ export class TradeService {
     return {
       txHash,
       protectionMinOutWei: minOut.toString(),
-      quotedOutWei: null,
+      quotedOutWei: quotedOutWei > 0n ? quotedOutWei.toString() : null,
       broadcastVia,
       broadcastUrl,
       isBundle,
@@ -6211,8 +8067,12 @@ export class TradeService {
         }
       }
       if (!tokenInfo) throw new Error('Token info required');
-      tokenInfo = await this.ensureFlapTradeTokenInfo(input.chainId, tokenInfo, settings.ui?.consoleLogsEnabled === true);
+      tokenInfo = await this.ensureMutilWindowTradeTokenInfo(input.chainId, tokenInfo, sellDebug);
+      tokenInfo = await this.ensureFlapTradeTokenInfo(input.chainId, tokenInfo, sellDebug);
       input.tokenInfo = tokenInfo;
+      if (input.gmgnQuoteLineage?.length) {
+        this.seedGmgnQuoteLineageCache(input.chainId, input.gmgnQuoteLineage);
+      }
 
       const baseTokenSymbol = this.resolveBaseTokenSymbol(input.chainId, baseTokenAddress);
       const baseFee = input.poolFee ?? 2500;
@@ -6253,14 +8113,24 @@ export class TradeService {
         const platformLower = launchpadRoute.platform;
         const isHyperAltfun = launchpadRoute.isHyperAltfun;
         const isPons = launchpadRoute.isPons;
+        const isGeniusCandidate = launchpadRoute.isGenius;
         const isInner = launchpadRoute.isInner;
+      const geniusState = isGeniusCandidate
+        ? await timeStep('genius:state', () => getGeniusTradeState(sellToken, { force: runtimeOpts?.forceRefreshHyperState === true }))
+        : null;
+      if (isGeniusCandidate && geniusState && !geniusState.tradeable) {
+        if (geniusState.phase === 1) throw new Error('Genius 代币正在毕业，请稍后再试');
+        if (geniusState.phase === 3) throw new Error('Genius 代币已下架，无法交易');
+      }
+      const isInnerEffective = geniusState ? geniusState.isInner : isInner;
       const isInnerFourMeme = isInner && isFourMemePlatform(platformLower);
-      const launchpadConfig = isInner ? this.getLaunchpadConfig(tokenInfo, input.chainId, openFourRuntime) : null;
-      const isPonsInner = isPons && isInner;
-      const bridgeToken = (isHyperAltfun || isPonsInner) ? null : this.getLaunchpadQuoteRouterToken(input.chainId as ChainId, tokenInfo, platformLower, openFourRuntime, {
+      const launchpadConfig = isInnerEffective ? this.getLaunchpadConfig(tokenInfo, input.chainId, openFourRuntime) : null;
+      const isPonsInner = isPons && isInnerEffective;
+      const isGeniusDedicated = !!geniusState?.tradeable && isGeniusCandidate;
+      const bridgeToken = (isHyperAltfun || isPonsInner || isGeniusDedicated) ? null : this.getLaunchpadQuoteRouterToken(input.chainId as ChainId, tokenInfo, platformLower, openFourRuntime, {
         preferRuntimeQuote: usesOpenFourRuntime(platformLower),
       });
-      const rawQuoteToken = (isHyperAltfun || isPonsInner) ? null : await this.resolveTradeRouteQuoteToken({
+      const rawQuoteToken = (isHyperAltfun || isPonsInner || isGeniusDedicated) ? null : await this.resolveTradeRouteQuoteToken({
         chainId: input.chainId as ChainId,
         tokenAddress: sellToken,
         tokenInfo,
@@ -6273,16 +8143,27 @@ export class TradeService {
       const needsBridgeHop2 = !!bridgeToken && bridgeToken.toLowerCase() !== ZERO_ADDRESS.toLowerCase();
       const bridgePrefer = needsBridgeHop2 ? getBridgeTokenDexPreference(input.chainId as ChainId, bridgeToken) : null;
       const needsStocksQuoteRoute = this.needsNonTerminalQuoteRoute(input.chainId, baseTokenAddress, rawQuoteToken);
-      const preparedRoute = (isHyperAltfun || isPonsInner)
-        ? null
-        : await timeStep('route:prepare', () => this.prepareEvmTradeRoute({
+      const preparedRoute = await timeStep('route:prepare', () =>
+        this.resolveBuyPreparedRoute({
           chainId: input.chainId,
           tokenAddress: sellToken,
           tokenInfo,
           baseTokenAddress,
-        }));
-      if (!isHyperAltfun && !isPonsInner && !preparedRoute?.descs.length) {
+          storedDescs: input.preparedRouteDescs,
+          prepareBudgetMs: 15_000,
+        })
+      );
+      if (!isHyperAltfun && !isPonsInner && !isGeniusDedicated && !preparedRoute?.descs.length) {
         throw new Error('官方报价路径尚未就绪，请稍后再试');
+      }
+      if (isGeniusDedicated && !preparedRoute?.descs.length) {
+        throw new Error('Genius 路由尚未就绪，请稍后再试');
+      }
+      if (isPonsInner && !preparedRoute?.descs.length) {
+        throw new Error('Pons 路由尚未就绪，请稍后再试');
+      }
+      if (isHyperAltfun && !preparedRoute?.descs.length) {
+        throw new Error('alt.fun 路由尚未就绪，请稍后再试');
       }
       if (input.chainId === ChainId.RH && this.hasUnusableRhV4Fee(preparedRoute?.descs)) {
         throw new Error('RH Uniswap V4 pool fee 未就绪，请稍后重试');
@@ -6290,9 +8171,10 @@ export class TradeService {
       const preparedSplit = this.splitPreparedBuyRoute(preparedRoute, sellToken);
       const descs: SwapDescLike[] = [];
       let estimatedOut = 0n;
+      let minOut = 0n;
       let minFundsForSell = 0n;
       let sellTokenManager: Address | null = null;
-      let sellManagerForRoute: Address = (isHyperAltfun || isPonsInner) ? ZERO_ADDRESS : (launchpadConfig?.manager ?? ZERO_ADDRESS);
+      let sellManagerForRoute: Address = (isHyperAltfun || isPonsInner || isGeniusDedicated) ? ZERO_ADDRESS : (launchpadConfig?.manager ?? ZERO_ADDRESS);
       let amountInForQuote = amountIn;
       if (isTurbo) {
         if (percentBps <= 0 || percentBps > 10000) throw new Error('Invalid percent');
@@ -6300,7 +8182,30 @@ export class TradeService {
         amountInForQuote = baseBal > 0n ? (baseBal * BigInt(percentBps)) / 10000n : 1n;
       }
 
-      if (isPonsInner) {
+      const useInnerLaunchpadHop = this.shouldUseInnerLaunchpadHop(tokenInfo, isInnerEffective, launchpadConfig);
+      const preparedExec = preparedRoute
+        ? await this.tryAppendPreparedDexExecutionRoute({
+          side: 'sell',
+          chainId: input.chainId,
+          preparedRoute,
+          amountIn: amountInForQuote,
+          memeTokenAddress: sellToken,
+          tokenInfo,
+          baseTokenAddress,
+          isTurbo,
+          slippageBps: getSlippageBps(settings, input.chainId, input.slippageBps),
+          descs,
+          timeStep,
+          debug: sellDebug,
+        })
+        : null;
+      const usedPreparedDexTopology = !!preparedExec;
+      if (preparedExec) {
+        estimatedOut = preparedExec.estimatedOut;
+        minOut = preparedExec.minOut;
+      }
+
+      if (!usedPreparedDexTopology && isPonsInner) {
         const ponsState = await timeStep('pons:state', () => getPonsTradeState(sellToken, { force: runtimeOpts?.forceRefreshHyperState === true }));
         if (!ponsState?.tradeable) throw new Error('该代币不是可交易的 pons 代币');
 
@@ -6325,18 +8230,96 @@ export class TradeService {
 
         if (baseTokenAddress.toLowerCase() !== innerTokenOut.toLowerCase()) {
           const hop2AmountIn = isTurbo ? 1n : (minQuoteOut > 0n ? minQuoteOut : 1n);
-          const bridgedOut = await this.appendRhRouterBridgeHops({
-            chainId: input.chainId,
-            tokenIn: innerTokenOut,
-            tokenOut: baseTokenAddress,
-            amountIn: hop2AmountIn,
-            isTurbo,
-            descs,
-            timeStep,
-          });
-          if (!isTurbo) estimatedOut = bridgedOut;
+          // Reuse the reversed bridge prefix from the unified prepared route
+          // (the same descs the buy path and UI preview use), only re-quoting
+          // with the real amount. Fall back to appendRhRouterBridgeHops when
+          // the prepared route has no bridge prefix.
+          const bridgeDescs = preparedSplit?.quoteDescs.length
+            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
+            : null;
+          if (bridgeDescs?.length) {
+            descs.push(...(this.cloneSwapDescLikeArray(bridgeDescs) ?? []));
+            if (!isTurbo) {
+              let amt = hop2AmountIn;
+              for (const desc of bridgeDescs) {
+                amt = await timeStep('quote:pons:bridge:hop2', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, amt)
+                );
+                if (amt <= 0n) throw new Error('Pons 报价资产桥接报价失败');
+              }
+              estimatedOut = amt;
+            }
+          } else {
+            const bridgedOut = await this.appendRhRouterBridgeHops({
+              chainId: input.chainId,
+              tokenIn: innerTokenOut,
+              tokenOut: baseTokenAddress,
+              amountIn: hop2AmountIn,
+              isTurbo,
+              descs,
+              timeStep,
+            });
+            if (!isTurbo) estimatedOut = bridgedOut;
+          }
         }
-      } else if (isHyperAltfun) {
+      } else if (!usedPreparedDexTopology && isGeniusDedicated && geniusState) {
+        const innerTokenOut = geniusState.quoteRouterToken;
+        let minQuoteOut = 0n;
+        if (!isTurbo) {
+          const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
+          const estimatedQuote = await timeStep('quote:genius:sell', () => quoteGeniusSell(sellToken, amountIn));
+          if (estimatedQuote <= 0n) throw new Error('Genius 卖出报价失败');
+          minQuoteOut = applySlippage(estimatedQuote, slippageBps);
+          if (baseTokenAddress.toLowerCase() === innerTokenOut.toLowerCase()) {
+            estimatedOut = estimatedQuote;
+          }
+        }
+
+        if (geniusState.isInner) {
+          sellManagerForRoute = geniusState.curve;
+        }
+
+        descs.push(buildGeniusSellDesc({
+          state: geniusState,
+          tokenIn: sellToken,
+          minOut: minQuoteOut,
+        }));
+
+        if (baseTokenAddress.toLowerCase() !== innerTokenOut.toLowerCase()) {
+          const hop2AmountIn = isTurbo ? 1n : (minQuoteOut > 0n ? minQuoteOut : 1n);
+          // Reuse the reversed bridge prefix from the unified prepared route
+          // (the same descs the buy path and UI preview use), only re-quoting
+          // with the real amount.
+          const bridgeDescs = preparedSplit?.quoteDescs.length
+            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
+            : null;
+          if (bridgeDescs?.length) {
+            descs.push(...(this.cloneSwapDescLikeArray(bridgeDescs) ?? []));
+            if (!isTurbo) {
+              let amt = hop2AmountIn;
+              for (const desc of bridgeDescs) {
+                amt = await timeStep('quote:genius:bridge:hop2', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, amt)
+                );
+                if (amt <= 0n) throw new Error('Genius 报价资产桥接报价失败');
+              }
+              estimatedOut = amt;
+            }
+          } else {
+            const bridgedOut = await this.appendBnbQuoteBridgeHop({
+              chainId: input.chainId,
+              tokenIn: innerTokenOut,
+              tokenOut: baseTokenAddress,
+              amountIn: hop2AmountIn,
+              isTurbo,
+              descs,
+              timeStep,
+              label: 'quote:genius:bridge:hop2',
+            });
+            if (!isTurbo) estimatedOut = bridgedOut;
+          }
+        }
+      } else if (!usedPreparedDexTopology && isHyperAltfun) {
         const hyperState = await timeStep('hyper:state', () => getHyperTradeState(sellToken, { force: runtimeOpts?.forceRefreshHyperState === true }));
         if (!hyperState.isInner && !hyperState.isOuter) throw new Error('该代币不是有效的 alt.fun Hyper 代币');
 
@@ -6362,40 +8345,65 @@ export class TradeService {
         }));
 
         if (baseTokenAddress.toLowerCase() !== innerTokenOut.toLowerCase()) {
-          const bridgePrefer = getBridgeTokenDexPreference(input.chainId as ChainId, innerTokenOut);
           const hop2AmountIn = isTurbo ? 1n : (minUsdcOut > 0n ? minUsdcOut : 1n);
-          const hop2 = await timeStep('quote:hyper:bridge:hop2', () =>
-            resolveBridgeHopExactIn(
-              input.chainId,
-              innerTokenOut,
-              baseTokenAddress,
-              hop2AmountIn,
-              bridgePrefer,
-              isTurbo,
-              !isTurbo
-            )
-          );
-          if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
-            throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
-          }
-          if (!isTurbo) {
-            try {
-              assertDexQuoteOk(hop2);
-            } catch {
+          // Reuse the reversed bridge prefix from the unified prepared route
+          // (the same descs the buy path and UI preview use), only re-quoting
+          // with the real amount. Fall back to resolveBridgeHopExactIn when the
+          // prepared route has no bridge prefix.
+          const bridgeDescs = preparedSplit?.quoteDescs.length
+            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
+            : null;
+          if (bridgeDescs?.length) {
+            for (const desc of bridgeDescs) {
+              descs.push({ ...desc, swapType: toHyperDexSwapType(desc.swapType as SwapType) });
+            }
+            if (!isTurbo) {
+              let amt = hop2AmountIn;
+              for (const desc of bridgeDescs) {
+                amt = await timeStep('quote:hyper:bridge:hop2', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, amt)
+                );
+                if (amt <= 0n) throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
+              }
+              estimatedOut = amt;
+            }
+          } else {
+            const bridgePrefer = getBridgeTokenDexPreference(input.chainId as ChainId, innerTokenOut);
+            const hop2 = await timeStep('quote:hyper:bridge:hop2', () =>
+              resolveBridgeHopExactIn(
+                input.chainId,
+                innerTokenOut,
+                baseTokenAddress,
+                hop2AmountIn,
+                bridgePrefer,
+                isTurbo,
+                !isTurbo
+              )
+            );
+            if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
               throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
             }
-            if (hop2.amountOut <= 0n) throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
-            estimatedOut = hop2.amountOut;
+            if (!isTurbo) {
+              try {
+                assertDexQuoteOk(hop2);
+              } catch {
+                throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
+              }
+              if (hop2.amountOut <= 0n) throw new Error(`找不到 USDC/${baseTokenSymbol} 的 Hyper 桥接交易池`);
+              estimatedOut = hop2.amountOut;
+            }
+            descs.push(getRouterSwapDesc({
+              swapType: toHyperDexSwapType(hop2.swapType),
+              tokenIn: innerTokenOut,
+              tokenOut: baseTokenAddress,
+              poolAddress: hop2.poolAddress,
+              fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
+            }));
           }
-          descs.push(getRouterSwapDesc({
-            swapType: toHyperDexSwapType(hop2.swapType),
-            tokenIn: innerTokenOut,
-            tokenOut: baseTokenAddress,
-            poolAddress: hop2.poolAddress,
-            fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
-          }));
         }
-      } else if (isInner && launchpadConfig) {
+      } else if (!usedPreparedDexTopology && useInnerLaunchpadHop) {
+        const innerLaunchpadConfig = launchpadConfig;
+        if (!innerLaunchpadConfig) throw new Error('Launchpad config required');
         const platform = resolveTradeLaunchpadPlatform(tokenInfo);
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         let minFunds = 0n;
@@ -6470,7 +8478,7 @@ export class TradeService {
             ? bridgeToken
             : baseTokenAddress;
         descs.push(getRouterSwapDesc({
-          swapType: launchpadConfig.sellType,
+          swapType: innerLaunchpadConfig.sellType,
           tokenIn: sellToken,
           tokenOut: innerTokenOut,
           poolAddress: sellManagerForRoute,
@@ -6480,50 +8488,78 @@ export class TradeService {
         }));
 
         if (needsStocksQuoteRoute && rawQuoteToken) {
-          const quoteRouteDescs = preparedSplit?.quoteDescs.length
-            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
-            : await timeStep('quote:flapstocks:sell:route', () =>
-              this.buildFlapOuterSellQuoteRoute({
-                chainId: input.chainId,
-                currentToken: innerTokenOut,
-                targetToken: baseTokenAddress,
-                debug: settings.ui?.consoleLogsEnabled === true,
-              })
-            );
-          if (!quoteRouteDescs?.length) {
-            throw new Error(`找不到 Flap Quote/${baseTokenSymbol} 的交易路径，当前 flap_stock 无法完成卖出回收`);
+          if (!preparedSplit?.quoteDescs.length) {
+            throw new Error(`找不到 Quote/${baseTokenSymbol} 的交易路径，请等待路由刷新`);
           }
-          descs.push(...quoteRouteDescs);
+          descs.push(...(this.cloneSwapDescLikeArray(this.reverseSwapDescRoute(preparedSplit.quoteDescs)) ?? []));
         } else if (needsBridgeHop2) {
-          const hop2AmountIn = isTurbo ? 1n : (minFunds > 0n ? minFunds : 1n);
-          const hop2 = await timeStep('quote:bridge:hop2', () =>
-            resolveBridgeHopExactIn(
-              input.chainId,
-              innerTokenOut,
-              baseTokenAddress,
-              hop2AmountIn,
-              bridgePrefer,
-              isTurbo,
-              !isTurbo
-            )
-          );
-          if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
-            throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
-          }
-          descs.push(getRouterSwapDesc({
-            swapType: input.chainId === ChainId.RH ? toRhDexSwapType(hop2.swapType) : hop2.swapType,
-            tokenIn: innerTokenOut,
-            tokenOut: baseTokenAddress,
-            poolAddress: hop2.poolAddress,
-            fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
-          }));
-          if (!isTurbo && hop2.amountOut > 0n) {
-            estimatedOut = hop2.amountOut;
+          // Reuse the reversed prepared bridge prefix (same descs the buy path
+          // and UI preview use); fall back to direct resolveBridgeHopExactIn.
+          const preparedBridge = preparedSplit?.quoteDescs.length
+            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
+            : null;
+          if (preparedBridge?.length) {
+            let amt = isTurbo ? 1n : (minFunds > 0n ? minFunds : 1n);
+            for (const desc of preparedBridge) {
+              if (!isTurbo) {
+                const out = await timeStep('quote:bridge:hop2', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, amt)
+                );
+                if (out <= 0n) {
+                  throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+                }
+                amt = out;
+              } else {
+                amt = 1n;
+              }
+              descs.push({
+                ...desc,
+                swapType: input.chainId === ChainId.RH ? toRhDexSwapType(desc.swapType as SwapType) : desc.swapType,
+              });
+            }
+            if (!isTurbo) estimatedOut = amt;
+          } else {
+            const hop2AmountIn = isTurbo ? 1n : (minFunds > 0n ? minFunds : 1n);
+            const hop2 = await timeStep('quote:bridge:hop2', () =>
+              resolveBridgeHopExactIn(
+                input.chainId,
+                innerTokenOut,
+                baseTokenAddress,
+                hop2AmountIn,
+                bridgePrefer,
+                isTurbo,
+                !isTurbo
+              )
+            );
+            if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
+              throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+            }
+            descs.push(getRouterSwapDesc({
+              swapType: input.chainId === ChainId.RH ? toRhDexSwapType(hop2.swapType) : hop2.swapType,
+              tokenIn: innerTokenOut,
+              tokenOut: baseTokenAddress,
+              poolAddress: hop2.poolAddress,
+              fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
+            }));
+            if (!isTurbo && hop2.amountOut > 0n) {
+              estimatedOut = hop2.amountOut;
+            }
           }
         }
       }
 
-      if (!isInner && !isHyperAltfun) {
+      // Generic outer DEX sell (hop1 + hop2). Must NOT run when a dedicated branch
+      // above already built the full sell route — otherwise it appends a duplicate
+      // hop1 (e.g. Genius outer: the Genius branch already pushed Genius→quote +
+      // bridge, and this block would push another Genius→quote, causing the
+      // contract to re-sell Genius the router no longer holds → ERC20InsufficientBalance).
+      if (
+        !usedPreparedDexTopology
+        && !isInnerEffective
+        && !isHyperAltfun
+        && !isGeniusDedicated
+        && !isPonsInner
+      ) {
         const preferExactQuoteForStocks = isTurbo && needsStocksQuoteRoute;
         const turboRouteMode = isTurbo && !preferExactQuoteForStocks;
         // hop1
@@ -6593,33 +8629,10 @@ export class TradeService {
 
         // hop2
         if (needsStocksQuoteRoute && rawQuoteToken) {
-          this.logFlapStocksRoute(sellDebug, 'sell.outer.start', {
-            chainId: input.chainId,
-            tokenAddress: sellToken,
-            baseTokenAddress,
-            rawQuoteToken,
-            launchpadPlatform: platformLower,
-            launchpadStatus: tokenInfo.launchpad_status ?? null,
-            launchType: tokenInfo.tpool_launch_type ?? null,
-            targetPoolPair: tokenInfo.pool_pair ?? null,
-            targetBiggestPoolAddress: tokenInfo.biggest_pool_address ?? null,
-            targetTpoolPoolAddress: tokenInfo.tpool_pool_address ?? null,
-            executionMode,
-          });
-          const quoteRouteDescs = preparedSplit?.quoteDescs.length
-            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
-            : await timeStep('quote:flapstocks:outer:sell:route', () =>
-              this.buildFlapOuterSellQuoteRoute({
-                chainId: input.chainId,
-                currentToken: hop1RouterOut,
-                targetToken: baseTokenAddress,
-                debug: sellDebug,
-              })
-            );
-          if (!quoteRouteDescs?.length) {
-            throw new Error(`找不到 Flap Quote/${baseTokenSymbol} 的交易路径，当前 flap_stock 无法完成卖出预处理`);
+          if (!preparedSplit?.quoteDescs.length) {
+            throw new Error(`找不到 Quote/${baseTokenSymbol} 的交易路径，请等待路由刷新`);
           }
-          descs.push(...quoteRouteDescs);
+          descs.push(...(this.cloneSwapDescLikeArray(this.reverseSwapDescRoute(preparedSplit.quoteDescs)) ?? []));
           estimatedOut = 0n;
         } else if (!needsBridgeHop2) {
           estimatedOut = turboRouteMode ? 0n : hop1AmountOut;
@@ -6629,44 +8642,70 @@ export class TradeService {
             throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
           }
           const hop2AmountIn = hop2Unquoted ? 1n : hop1AmountOut;
-          const hop2 = await timeStep('quote:bridge:hop2', () =>
-            resolveBridgeHopExactIn(
-              input.chainId,
-              bridgeToken,
-              baseTokenAddress,
-              hop2AmountIn,
-              bridgePrefer,
-              hop2Unquoted,
-              !hop2Unquoted
-            )
-          );
-          if (hop2Unquoted) {
-            if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
-              throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+          // Reuse the reversed prepared bridge prefix (same descs the buy path
+          // and UI preview use); fall back to direct resolveBridgeHopExactIn.
+          const preparedBridge = preparedSplit?.quoteDescs.length
+            ? this.reverseSwapDescRoute(preparedSplit.quoteDescs)
+            : null;
+          if (preparedBridge?.length) {
+            let amt = hop2AmountIn;
+            for (const desc of preparedBridge) {
+              if (!hop2Unquoted) {
+                const out = await timeStep('quote:bridge:hop2', () =>
+                  this.quoteSwapDescExactIn(input.chainId, desc, amt)
+                );
+                if (out <= 0n) {
+                  throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+                }
+                amt = out;
+              } else {
+                amt = 1n;
+              }
+              descs.push({
+                ...desc,
+                swapType: input.chainId === ChainId.RH ? toRhDexSwapType(desc.swapType as SwapType) : desc.swapType,
+              });
             }
+            estimatedOut = hop2Unquoted ? 0n : amt;
           } else {
-            try {
-              assertDexQuoteOk(hop2);
-            } catch {
+            const hop2 = await timeStep('quote:bridge:hop2', () =>
+              resolveBridgeHopExactIn(
+                input.chainId,
+                bridgeToken,
+                baseTokenAddress,
+                hop2AmountIn,
+                bridgePrefer,
+                hop2Unquoted,
+                !hop2Unquoted
+              )
+            );
+            if (hop2Unquoted) {
+              if (!hop2.poolAddress || hop2.poolAddress === ZERO_ADDRESS) {
+                throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+              }
+            } else {
+              try {
+                assertDexQuoteOk(hop2);
+              } catch {
+                throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
+              }
+            }
+            if (!hop2Unquoted && hop2.amountOut <= 0n) {
               throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
             }
+            descs.push(getRouterSwapDesc({
+              swapType: input.chainId === ChainId.RH ? toRhDexSwapType(hop2.swapType) : hop2.swapType,
+              tokenIn: bridgeToken,
+              tokenOut: baseTokenAddress,
+              poolAddress: hop2.poolAddress,
+              fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
+            }));
+            estimatedOut = hop2Unquoted ? 0n : hop2.amountOut;
           }
-          if (!hop2Unquoted && hop2.amountOut <= 0n) {
-            throw new Error(`找不到 Quote/${baseTokenSymbol} 的 V2/V3 交易池，可能还没有在 DEX 上创建流动性`);
-          }
-          descs.push(getRouterSwapDesc({
-            swapType: input.chainId === ChainId.RH ? toRhDexSwapType(hop2.swapType) : hop2.swapType,
-            tokenIn: bridgeToken,
-            tokenOut: baseTokenAddress,
-            poolAddress: hop2.poolAddress,
-            fee: getV3FeeForDesc(hop2, getDefaultBridgeV3Fee(input.chainId)),
-          }));
-          estimatedOut = hop2Unquoted ? 0n : hop2.amountOut;
         }
       }
 
-      let minOut = 0n;
-      if (estimatedOut > 0n) {
+      if (!usedPreparedDexTopology && estimatedOut > 0n) {
         const slippageBps = getSlippageBps(settings, input.chainId, input.slippageBps);
         minOut = applySlippage(estimatedOut, slippageBps);
       }
@@ -6680,7 +8719,12 @@ export class TradeService {
       }
 
       const deadline = getDeadline(settings, input.chainId, input.deadlineSeconds);
-      const routedDescs = await this.attachV3FactoriesToDescs(input.chainId, descs);
+      const routedDescs = this.alignNativePayoutTokenOut(
+        input.chainId,
+        await this.attachV3FactoriesToDescs(input.chainId, descs),
+        baseTokenAddress,
+      );
+      if (!routedDescs.length) throw new Error('卖出路由尚未就绪，请稍后再试');
       const data = isTurbo
         ? encodeFunctionData({
           abi: dagobangAbi,
