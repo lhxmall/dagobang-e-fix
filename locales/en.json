@@ -358,7 +358,14 @@
         "top10HoldRatio": "Top10 holding",
         "holders": "Holders",
         "kol": "KOL",
-        "age": "Age"
+        "age": "Age",
+        "volMcRatio": "24h volume / market cap"
+      },
+      "volMcRatioTone": {
+        "healthy": "Vol≈MC, often still in rally",
+        "fair": "Healthy vol/MC balance",
+        "weak": "Low or uneven turnover",
+        "exhausted": "Vol>>MC, post-dump churn"
       },
       "monitorTag": {
         "watch": "Watch",
@@ -393,6 +400,13 @@
         "holderStrong": "Holder strong",
         "holderUp": "Holder up",
         "leaderStrong": "MC strong",
+        "kolIn": "KOL buying",
+        "smartMoneyIn": "Smart $ in",
+        "earlyMc": "Early MC",
+        "volMcHealthy": "Vol≈MC",
+        "volMcExhausted": "Vol>>MC",
+        "pullback": "Pullback",
+        "hollowHeat": "Hollow heat",
         "devOut": "Dev out",
         "devHigh": "Dev high",
         "topHeavy": "Top heavy"

@@ -358,7 +358,14 @@
         "top10HoldRatio": "Top10 持仓占比",
         "holders": "持币人数",
         "kol": "KOL",
-        "age": "年龄"
+        "age": "年龄",
+        "volMcRatio": "24h成交量/市值"
+      },
+      "volMcRatioTone": {
+        "healthy": "量价同步，常见仍在上涨段",
+        "fair": "量价基本健康",
+        "weak": "换手偏低或偏高，动能一般",
+        "exhausted": "量远超市值，多为砸盘后的高换手"
       },
       "monitorTag": {
         "watch": "可看",
@@ -393,6 +400,13 @@
         "holderStrong": "人气强",
         "holderUp": "持有人升",
         "leaderStrong": "市值强",
+        "kolIn": "KOL买入",
+        "smartMoneyIn": "聪明钱进",
+        "earlyMc": "市值早期",
+        "volMcHealthy": "量价同步",
+        "volMcExhausted": "量远超市值",
+        "pullback": "回调入场",
+        "hollowHeat": "空热",
         "devOut": "Dev出",
         "devHigh": "Dev高",
         "topHeavy": "筹码重"
