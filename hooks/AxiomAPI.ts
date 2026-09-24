@@ -139,7 +139,7 @@ export class AxiomAPI {
     if (!mint) return null;
     const name = pick(pair.tokenName, pair.name, nested?.tokenName, nested?.name);
     const ticker = pick(pair.tokenTicker, pair.symbol, pair.ticker, nested?.tokenTicker, nested?.symbol, nested?.ticker);
-    const pageLabel = this.readPageTokenLabel();
+    const pageLabel = this.readPageTokenLabel() ?? "";
     const displayName = name || ticker || pageLabel;
     const displayTicker = ticker || name || pageLabel;
     if (!displayName && !displayTicker) return null;
