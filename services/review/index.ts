@@ -1,9 +1,27 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { browser } from 'wxt/browser';
 import type { TradeReview, TradeReviewFilters, TradeReviewUpsertInput } from '@/types/review';
-import { normalizeAddress, normalizeAddressKey, normalizeWalletAddressKey } from '@/services/xSniper/engine/metrics';
+import { isSolanaAddress, normalizeAddress, normalizeAddressKey } from '@/services/xSniper/engine/metrics';
+import { normalizeUnixSeconds, readReviewSample } from '@/services/review/sample';
 
 const TABLE_NAME = 'trade_reviews';
 const CACHE_KEY = 'dagobang_trade_reviews_cache_v1';
+const SUPABASE_STORAGE_KEY = 'dagobang_supabase_config_v1';
+const TAG_STORAGE_KEY = 'dagobang_review_tags_v1';
+
+export type ReviewTagCatalog = {
+  narratives: string[];
+  catalysts: string[];
+  results: string[];
+};
+const SUPABASE_URL_KEY = 'dagobang_supabase_url';
+const SUPABASE_ANON_KEY = 'dagobang_supabase_anon_key';
+
+type SupabaseConfig = { url: string; anonKey: string };
+
+let storedConfig: SupabaseConfig | null = null;
+let configHydrated = false;
+let hydratePromise: Promise<SupabaseConfig> | null = null;
 
 type TradeReviewRow = {
   id: string;
@@ -116,6 +134,7 @@ function toReview(row: TradeReviewRow): TradeReview {
   metrics.favoritesCount = favoritesCount;
   metrics.commentsCount = commentsCount;
   metrics.engagementScore = engagementScore;
+  const sample = readReviewSample({ metrics, narrativeTags });
   const qualityScore = Number.isFinite(Number(row.quality_score))
     ? clampScore(Number(row.quality_score))
     : calcQualityScore({
@@ -141,6 +160,13 @@ function toReview(row: TradeReviewRow): TradeReview {
     reviewTitle: row.review_title,
     tags: Array.isArray(row.tags) ? row.tags : [],
     narrativeTags,
+    narrative: sample.narrative,
+    catalyst: sample.catalyst,
+    catalystNote: sample.catalystNote,
+    catalystResult: sample.catalystResult,
+    peakMarketCap: sample.peakMarketCap,
+    notionPageId: sample.notionPageId,
+    notionSyncedHash: sample.notionSyncedHash,
     mistakes: Array.isArray(row.mistakes) ? row.mistakes : [],
     emotionScore: Number(row.emotion_score || 0),
     executionScore: Number(row.execution_score || 0),
@@ -150,8 +176,8 @@ function toReview(row: TradeReviewRow): TradeReview {
     summary: row.summary || '',
     lessonLearned: row.lesson_learned || '',
     nextAction: row.next_action || '',
-    holdStartAt: row.hold_start_at ?? null,
-    holdEndAt: row.hold_end_at ?? null,
+    holdStartAt: normalizeUnixSeconds(row.hold_start_at ?? metrics.holdStartAt),
+    holdEndAt: normalizeUnixSeconds(row.hold_end_at ?? metrics.holdEndAt),
     qualityScore,
     engagementScore,
     metrics,
@@ -161,16 +187,30 @@ function toReview(row: TradeReviewRow): TradeReview {
 }
 
 function toRow(input: TradeReviewUpsertInput): Omit<TradeReviewRow, 'created_at' | 'updated_at'> {
-  const narrativeTags = input.narrativeTags || [];
+  const narrative = String(input.narrative || '').trim();
+  const narrativeTags = narrative ? [narrative] : (input.narrativeTags || []);
   const buyLogic = input.buyLogic || '';
   const sellLogic = input.sellLogic || '';
   const likesCount = normalizeCount(input.metrics?.likesCount);
   const favoritesCount = normalizeCount(input.metrics?.favoritesCount);
   const commentsCount = normalizeCount(input.metrics?.commentsCount);
   const engagementScore = calcEngagementScore(likesCount, favoritesCount, commentsCount);
+  const peak = Number(input.peakMarketCap);
+  const holdStartAt = normalizeUnixSeconds(input.holdStartAt ?? input.metrics?.holdStartAt);
+  const holdEndAt = normalizeUnixSeconds(input.holdEndAt ?? input.metrics?.holdEndAt);
   const mergedMetrics = {
     ...(input.metrics || {}),
     narrativeTags,
+    narrative,
+    catalyst: String(input.catalyst || '').trim(),
+    catalystNote: String(input.catalystNote || '').trim(),
+    catalystResult: String(input.catalystResult || '').trim(),
+    peakMarketCap: Number.isFinite(peak) && peak > 0 ? peak : null,
+    notionPageId: String(input.notionPageId || '').trim(),
+    notionSyncedHash: String(input.notionSyncedHash || '').trim(),
+    holdStartAt,
+    holdEndAt,
+    holdDurationSec: holdStartAt && holdEndAt ? Math.max(0, holdEndAt - holdStartAt) : (input.metrics?.holdDurationSec ?? null),
     buyLogic,
     sellLogic,
     likesCount,
@@ -217,20 +257,138 @@ function toRow(input: TradeReviewUpsertInput): Omit<TradeReviewRow, 'created_at'
     summary: input.summary,
     lesson_learned: input.lessonLearned,
     next_action: input.nextAction,
-    hold_start_at: input.holdStartAt ?? null,
-    hold_end_at: input.holdEndAt ?? null,
+    hold_start_at: holdStartAt,
+    hold_end_at: holdEndAt,
     metrics: mergedMetrics,
   };
 }
 
-function getSupabaseConfig() {
-  const envUrl = (import.meta as any).env?.WXT_PUBLIC_SUPABASE_URL || '';
-  const envAnon = (import.meta as any).env?.WXT_PUBLIC_SUPABASE_ANON_KEY || '';
-  const localUrl = window.localStorage.getItem('dagobang_supabase_url') || '';
-  const localAnon = window.localStorage.getItem('dagobang_supabase_anon_key') || '';
-  const url = String(localUrl || envUrl || '').trim();
-  const anonKey = String(localAnon || envAnon || '').trim();
-  return { url, anonKey };
+function readPageConfig(): SupabaseConfig {
+  try {
+    return {
+      url: String(window.localStorage.getItem(SUPABASE_URL_KEY) || '').trim(),
+      anonKey: String(window.localStorage.getItem(SUPABASE_ANON_KEY) || '').trim(),
+    };
+  } catch {
+    return { url: '', anonKey: '' };
+  }
+}
+
+function writePageConfig(config: SupabaseConfig) {
+  try {
+    if (config.url) window.localStorage.setItem(SUPABASE_URL_KEY, config.url);
+    else window.localStorage.removeItem(SUPABASE_URL_KEY);
+    if (config.anonKey) window.localStorage.setItem(SUPABASE_ANON_KEY, config.anonKey);
+    else window.localStorage.removeItem(SUPABASE_ANON_KEY);
+  } catch {
+  }
+}
+
+function readEnvConfig(): SupabaseConfig {
+  return {
+    url: String((import.meta as any).env?.WXT_PUBLIC_SUPABASE_URL || '').trim(),
+    anonKey: String((import.meta as any).env?.WXT_PUBLIC_SUPABASE_ANON_KEY || '').trim(),
+  };
+}
+
+function getSupabaseConfig(): SupabaseConfig {
+  const page = readPageConfig();
+  const env = readEnvConfig();
+  const stored = configHydrated ? storedConfig : null;
+  return {
+    url: String(stored?.url || page.url || env.url || '').trim(),
+    anonKey: String(stored?.anonKey || page.anonKey || env.anonKey || '').trim(),
+  };
+}
+
+export async function loadReviewSupabaseConfig(): Promise<SupabaseConfig> {
+  if (!hydratePromise) {
+    hydratePromise = (async () => {
+      try {
+        const res = await browser.storage.local.get(SUPABASE_STORAGE_KEY);
+        const raw = res?.[SUPABASE_STORAGE_KEY] as Partial<SupabaseConfig> | undefined;
+        if (!configHydrated) {
+          storedConfig = {
+            url: String(raw?.url || '').trim(),
+            anonKey: String(raw?.anonKey || '').trim(),
+          };
+          configHydrated = true;
+          ReviewService.resetClient();
+        }
+      } catch {
+        if (!configHydrated) {
+          storedConfig = { url: '', anonKey: '' };
+          configHydrated = true;
+        }
+      }
+      return getSupabaseConfig();
+    })();
+  }
+  return hydratePromise;
+}
+
+export async function saveReviewSupabaseConfig(url: string, anonKey: string): Promise<SupabaseConfig> {
+  const next = { url: String(url || '').trim(), anonKey: String(anonKey || '').trim() };
+  storedConfig = next;
+  configHydrated = true;
+  hydratePromise = Promise.resolve(getSupabaseConfig());
+  writePageConfig(next);
+  ReviewService.resetClient();
+  try {
+    await browser.storage.local.set({ [SUPABASE_STORAGE_KEY]: next });
+  } catch {
+  }
+  return getSupabaseConfig();
+}
+
+function uniqueTags(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const text = String(value || '').trim().slice(0, 32);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out.slice(0, 80);
+}
+
+export function mergeReviewTagCatalog(...parts: Array<Partial<ReviewTagCatalog> | null | undefined>): ReviewTagCatalog {
+  return {
+    narratives: uniqueTags(parts.flatMap((part) => part?.narratives || [])),
+    catalysts: uniqueTags(parts.flatMap((part) => part?.catalysts || [])),
+    results: uniqueTags(parts.flatMap((part) => part?.results || [])),
+  };
+}
+
+async function readStoredTagCatalog(): Promise<ReviewTagCatalog> {
+  try {
+    const res = await browser.storage.local.get(TAG_STORAGE_KEY);
+    const raw = res?.[TAG_STORAGE_KEY] as Partial<ReviewTagCatalog> | undefined;
+    return mergeReviewTagCatalog(raw);
+  } catch {
+    return { narratives: [], catalysts: [], results: [] };
+  }
+}
+
+export async function loadReviewTagCatalog(): Promise<ReviewTagCatalog> {
+  const [stored, remote] = await Promise.all([
+    readStoredTagCatalog(),
+    ReviewService.listTagCatalog(),
+  ]);
+  return mergeReviewTagCatalog(stored, remote);
+}
+
+export async function rememberReviewTags(partial: Partial<ReviewTagCatalog>): Promise<ReviewTagCatalog> {
+  const stored = await readStoredTagCatalog();
+  const next = mergeReviewTagCatalog(stored, partial);
+  try {
+    await browser.storage.local.set({ [TAG_STORAGE_KEY]: next });
+  } catch {
+  }
+  return next;
 }
 
 function getCache(): TradeReview[] {
@@ -252,14 +410,22 @@ function setCache(items: TradeReview[]) {
   }
 }
 
+function sameStoredAddress(stored: string, query: string): boolean {
+  const left = normalizeAddressKey(stored);
+  const right = normalizeAddressKey(query);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return isSolanaAddress(left) && isSolanaAddress(right) && left.toLowerCase() === right.toLowerCase();
+}
+
 function filterReviews(items: TradeReview[], filters: TradeReviewFilters = {}) {
   const search = (filters.search || '').trim().toLowerCase();
-  const tokenAddress = normalizeAddressKey(filters.tokenAddress || '');
-  const walletAddress = normalizeWalletAddressKey(filters.walletAddress || '');
+  const tokenAddress = String(filters.tokenAddress || '').trim();
+  const walletAddress = String(filters.walletAddress || '').trim();
   let result = items.filter((item) => {
-    if (walletAddress && normalizeWalletAddressKey(item.walletAddress) !== walletAddress) return false;
+    if (walletAddress && !sameStoredAddress(item.walletAddress, walletAddress)) return false;
     if (filters.chain && item.chain !== filters.chain) return false;
-    if (tokenAddress && normalizeAddressKey(item.tokenAddress) !== tokenAddress) return false;
+    if (tokenAddress && !sameStoredAddress(item.tokenAddress, tokenAddress)) return false;
     if (!search) return true;
     const combined = [
       item.tokenAddress,
@@ -271,9 +437,13 @@ function filterReviews(items: TradeReview[], filters: TradeReviewFilters = {}) {
       item.sellLogic,
       item.lessonLearned,
       item.nextAction,
-      item.tags.join(' '),
-      item.narrativeTags.join(' '),
-      item.mistakes.join(' ')
+      item.tags?.join?.(' ') || '',
+      item.narrativeTags?.join?.(' ') || '',
+      item.narrative,
+      item.catalyst,
+      item.catalystNote,
+      item.catalystResult,
+      item.mistakes?.join?.(' ') || ''
     ].join(' ').toLowerCase();
     return combined.includes(search);
   });
@@ -287,6 +457,14 @@ function filterReviews(items: TradeReview[], filters: TradeReviewFilters = {}) {
 export class ReviewService {
   private static client: SupabaseClient | null = null;
   private static configKey = '';
+
+  private static localPush: Promise<void> | null = null;
+
+  static resetClient() {
+    this.client = null;
+    this.configKey = '';
+    this.localPush = null;
+  }
 
   private static getClient() {
     const cfg = getSupabaseConfig();
@@ -302,24 +480,81 @@ export class ReviewService {
     return this.client;
   }
 
+  private static async pushLocalOnlyReviews(client: SupabaseClient): Promise<void> {
+    if (!this.localPush) {
+      this.localPush = (async () => {
+        const localItems = getCache().filter((item) => item?.id);
+        if (!localItems.length) return;
+        const { data, error } = await client.from(TABLE_NAME).select('id');
+        if (error) return;
+        const remoteIds = new Set((Array.isArray(data) ? data : []).map((row) => String((row as { id?: string }).id || '')));
+        for (const item of localItems) {
+          if (remoteIds.has(item.id)) continue;
+          const saved = await this.upsert(item);
+          if (saved.source === 'cloud') remoteIds.add(saved.item.id);
+        }
+      })().finally(() => {
+        this.localPush = null;
+      });
+    }
+    await this.localPush;
+  }
+
+  static async listTagCatalog(): Promise<ReviewTagCatalog> {
+    await loadReviewSupabaseConfig();
+    const narratives: string[] = [];
+    const catalysts: string[] = [];
+    const results: string[] = [];
+    const push = (item: { narrative?: string; catalyst?: string; catalystResult?: string }) => {
+      narratives.push(String(item.narrative || ''));
+      catalysts.push(String(item.catalyst || ''));
+      results.push(String(item.catalystResult || ''));
+    };
+    for (const item of getCache()) push(item);
+    const client = this.getClient();
+    if (client) {
+      try {
+        const { data, error } = await client
+          .from(TABLE_NAME)
+          .select('narrative_tags, metrics')
+          .limit(1000);
+        if (!error && Array.isArray(data)) {
+          for (const row of data) {
+            push(readReviewSample({
+              metrics: (row as { metrics?: Record<string, any> }).metrics,
+              narrativeTags: (row as { narrative_tags?: string[] | null }).narrative_tags,
+            }));
+          }
+        }
+      } catch {
+      }
+    }
+    return mergeReviewTagCatalog({ narratives, catalysts, results });
+  }
+
   static async list(filters: TradeReviewFilters = {}): Promise<{ items: TradeReview[]; source: 'cloud' | 'local' }> {
+    await loadReviewSupabaseConfig();
     const client = this.getClient();
     if (!client) {
       return { items: filterReviews(getCache(), filters), source: 'local' };
     }
     try {
+      const localBefore = getCache();
+      await this.pushLocalOnlyReviews(client);
       let query = client
         .from(TABLE_NAME)
         .select('*')
         .order('updated_at', { ascending: false });
       if (filters.walletAddress) {
-        query = query.eq('wallet_address', normalizeAddress(filters.walletAddress) ?? filters.walletAddress);
+        const wallet = normalizeAddress(filters.walletAddress) ?? filters.walletAddress;
+        query = isSolanaAddress(wallet) ? query.ilike('wallet_address', wallet) : query.eq('wallet_address', wallet);
       }
       if (filters.chain) {
         query = query.eq('chain', filters.chain);
       }
       if (filters.tokenAddress) {
-        query = query.eq('token_address', normalizeAddress(filters.tokenAddress) ?? filters.tokenAddress);
+        const token = normalizeAddress(filters.tokenAddress) ?? filters.tokenAddress;
+        query = isSolanaAddress(token) ? query.ilike('token_address', token) : query.eq('token_address', token);
       }
       if (filters.limit && filters.limit > 0) {
         query = query.limit(filters.limit);
@@ -327,15 +562,24 @@ export class ReviewService {
       const { data, error } = await query;
       if (error) throw error;
       const items = Array.isArray(data) ? (data as TradeReviewRow[]).map(toReview) : [];
-      const filtered = filterReviews(items, { ...filters, tokenAddress: undefined, walletAddress: undefined, chain: undefined, limit: undefined });
-      setCache(items);
-      return { items: filtered, source: 'cloud' };
+      const merged = new Map<string, TradeReview>();
+      for (const item of localBefore) {
+        if (item?.id) merged.set(item.id, item);
+      }
+      for (const item of getCache()) {
+        if (item?.id) merged.set(item.id, item);
+      }
+      for (const item of items) merged.set(item.id, item);
+      const nextCache = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+      setCache(nextCache);
+      return { items: filterReviews(nextCache, filters), source: 'cloud' };
     } catch {
       return { items: filterReviews(getCache(), filters), source: 'local' };
     }
   }
 
   static async upsert(input: TradeReviewUpsertInput): Promise<{ item: TradeReview; source: 'cloud' | 'local' }> {
+    await loadReviewSupabaseConfig();
     const row = toRow(input);
     const client = this.getClient();
     if (!client) {
@@ -402,6 +646,7 @@ export class ReviewService {
   }
 
   static async remove(id: string): Promise<{ ok: true; source: 'cloud' | 'local' }> {
+    await loadReviewSupabaseConfig();
     const client = this.getClient();
     if (!client) {
       setCache(getCache().filter((it) => it.id !== id));

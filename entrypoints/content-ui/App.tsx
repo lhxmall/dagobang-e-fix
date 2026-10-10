@@ -6126,9 +6126,11 @@ export default function App() {
             visible={showReviewPanel}
             onVisibleChange={setShowReviewPanel}
             settings={effectiveScopedSettings}
-            address={siteInfo?.walletAddress ?? address}
+            address={siteInfo?.walletAddress ?? gmgnHoldingWallets[0] ?? address}
+            chain={gmgnHoldingChain || null}
             tokenAddress={tokenAddressNormalized}
-            tokenSymbol={resolvedTokenSymbol}
+            tokenSymbol={tokenSymbol || gmgnHoldingTokenSymbol || tokenInfo?.symbol || null}
+            tokenName={tokenInfo?.name || null}
           />
 
           <CookingPanel
