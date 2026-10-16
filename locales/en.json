@@ -1128,7 +1128,8 @@
         "maximize": "Maximize",
         "input": "Input",
         "analysis": "Analysis",
-        "summary": "Lessons"
+        "summary": "Lessons",
+        "exportJson": "Export JSON"
       },
       "sync": {
         "title": "Supabase",
@@ -1151,6 +1152,9 @@
         "autofillFailed": "Autofill failed",
         "savedCloud": "Saved to Supabase",
         "savedLocal": "Saved to local cache",
+        "exportSuccess": "Exported {0} reviews",
+        "exportEmpty": "Nothing to export",
+        "exportFailed": "Export failed",
         "saveFailed": "Save failed",
         "deleted": "Deleted",
         "deleteFailed": "Delete failed"

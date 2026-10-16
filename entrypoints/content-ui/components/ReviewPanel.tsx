@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import toast from 'react-hot-toast';
-import { X, RefreshCw, Save, Trash2, Search, Cloud, HardDrive, Settings as SettingsIcon } from 'lucide-react';
+import { X, RefreshCw, Save, Trash2, Search, Cloud, HardDrive, Settings as SettingsIcon, Download } from 'lucide-react';
 import type { Settings } from '@/types/extention';
 import { normalizeLocale, t, type Locale } from '@/utils/i18n';
 import { parseCurrentUrl, parsePlatformTokenLink } from '@/utils/sites';
@@ -157,6 +157,12 @@ function sameTokenAddress(left: string, right: string): boolean {
 function shortAddress(addr: string) {
   if (!addr || addr.length < 10) return addr || '-';
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+function buildReviewExportFilename(walletAddress: string | null) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const walletPart = walletAddress ? `${shortAddress(walletAddress)}-` : '';
+  return `dagobang-reviews-${walletPart}${stamp}.json`;
 }
 
 function isPlaceholderSymbol(symbol: string, tokenAddress: string): boolean {
@@ -989,6 +995,66 @@ function ReviewPanelBody({
       .sort((a, b) => b.score - a.score || (b.item.updatedAt || 0) - (a.item.updatedAt || 0));
   }, [scopedReviews]);
 
+  const handleExportJson = () => {
+    const walletKey = address ? normalizeAddressKey(address) : '';
+    let items = walletKey
+      ? allReviews.filter((item) => normalizeAddressKey(item.walletAddress) === walletKey)
+      : [...allReviews];
+    if (viewMode !== 'input' && chainFilter !== 'all') {
+      items = items.filter((item) => reviewChainLabel(item.chain) === chainFilter);
+    } else if (viewMode === 'input' && search.trim()) {
+      const q = search.trim().toLowerCase();
+      items = items.filter((item) => {
+        const hay = [
+          item.tokenSymbol,
+          item.tokenName,
+          item.tokenAddress,
+          item.narrative,
+          item.catalyst,
+          item.catalystResult,
+          item.reviewTitle,
+          item.buyLogic,
+          item.sellLogic,
+          item.summary,
+          item.lessonLearned,
+          ...(item.tags || []),
+        ].join(' ').toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    if (items.length === 0) {
+      toast.error(tt('contentUi.review.toast.exportEmpty'));
+      return;
+    }
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      walletAddress: address || null,
+      dataSource,
+      filters: {
+        viewMode,
+        chainFilter,
+        search: search.trim() || null,
+      },
+      tagCatalog: sharedTags,
+      items,
+    };
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = buildReviewExportFilename(address);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(tt('contentUi.review.toast.exportSuccess', [items.length]));
+    } catch (err: any) {
+      toast.error(err?.message || tt('contentUi.review.toast.exportFailed'));
+    }
+  };
+
   const adjustLessonScore = async (item: TradeReview, delta: number) => {
     const base = lessonScoreRef.current[item.id] ?? (Number(item.metrics?.lessonScore) || 0);
     const score = base + delta;
@@ -1143,6 +1209,14 @@ function ReviewPanelBody({
                 title={tt('contentUi.review.action.refresh')}
               >
                 <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+              </button>
+              <button
+                type="button"
+                onClick={handleExportJson}
+                className="rounded-md border border-zinc-700 p-2 text-zinc-300 hover:border-zinc-500"
+                title={tt('contentUi.review.action.exportJson')}
+              >
+                <Download size={14} />
               </button>
             </div>
 

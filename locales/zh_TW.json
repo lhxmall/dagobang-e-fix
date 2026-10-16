@@ -1128,7 +1128,8 @@
         "maximize": "最大化",
         "input": "輸入",
         "analysis": "分析",
-        "summary": "總結"
+        "summary": "總結",
+        "exportJson": "匯出 JSON"
       },
       "sync": {
         "title": "Supabase",
@@ -1151,6 +1152,9 @@
         "autofillFailed": "自動填充失敗",
         "savedCloud": "已同步到 Supabase",
         "savedLocal": "已儲存到本地快取",
+        "exportSuccess": "已匯出 {0} 條復盤",
+        "exportEmpty": "沒有可匯出的復盤",
+        "exportFailed": "匯出失敗",
         "saveFailed": "儲存失敗",
         "deleted": "刪除成功",
         "deleteFailed": "刪除失敗"
