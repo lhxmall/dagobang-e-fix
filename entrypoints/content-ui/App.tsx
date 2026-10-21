@@ -30,6 +30,7 @@ import {
   getAdvancedAutoSellMode,
 } from '@/services/limitOrders/advancedAutoSell';
 import { cancelAllSellLimitOrdersForToken } from '@/services/limitOrders/store';
+import { publishGmgnLimitOrderChartMarkers } from '@/services/chartMarkers/publishLimitOrderChartMarkers';
 
 import { CustomToaster } from './components/CustomToaster';
 import { LimitTradePanel } from './components/LimitTradePanel';
@@ -56,6 +57,7 @@ type GmgnHoldingStats = {
   currentSellUsd: number | null;
   currentProfitUsd: number | null;
   currentProfitPnl: number | null;
+  totalRealizedProfitUsd: number | null;
   totalBuyUsd: number | null;
   totalSellUsd: number | null;
   totalProfitUsd: number | null;
@@ -289,12 +291,14 @@ function aggregateGmgnHoldings(details: Array<GmgnTokenHolding | null | undefine
     acc.totalBuyUsd += totalBuyUsd;
     acc.totalSellUsd += totalSellUsd;
     acc.totalProfitUsd += totalProfitUsd;
+    acc.totalRealizedProfitUsd += realizedProfit ?? 0;
     return acc;
   }, {
     balanceUsd: 0,
     currentBuyUsd: 0,
     currentSellUsd: 0,
     currentProfitUsd: 0,
+    totalRealizedProfitUsd: 0,
     totalBuyUsd: 0,
     totalSellUsd: 0,
     totalProfitUsd: 0,
@@ -302,6 +306,7 @@ function aggregateGmgnHoldings(details: Array<GmgnTokenHolding | null | undefine
 
   return {
     ...sums,
+    totalRealizedProfitUsd: sums.totalRealizedProfitUsd,
     currentProfitPnl: sums.currentBuyUsd > 0 ? sums.currentProfitUsd / sums.currentBuyUsd : null,
     totalProfitPnl: sums.totalBuyUsd > 0 ? sums.totalProfitUsd / sums.totalBuyUsd : null,
     walletsCount: available.length,
@@ -4574,6 +4579,24 @@ export default function App() {
       orders: createdSummaries,
     });
     await followTokenForLimitOrders(tokenAddress, 'buy_auto_created_limit_orders');
+    if (ctx.siteInfo?.platform === 'gmgn' && ctx.siteInfo?.chain) {
+      try {
+        const listed = await call({
+          type: 'limitOrder:list',
+          chainId: ctx.chainId,
+          tokenAddress,
+        } as const);
+        publishGmgnLimitOrderChartMarkers({
+          chainName: ctx.siteInfo.chain,
+          tokenAddress,
+          orders: listed.orders,
+          currentPriceUsd: marketPriceUsd ?? basePriceUsd,
+          liveTokenInfo: latestTokenInfo,
+        });
+      } catch {
+        // chart lines refresh on next LimitTradePanel poll
+      }
+    }
     return createdOrderIds.size;
   }, [followTokenForLimitOrders, resolveAutoSellEntryPriceUsd, resolveEffectiveBuyTokenOutWei, tradeBasePriceUsdByKey, upsertTradeBasePriceUsd]);
 

@@ -40,6 +40,10 @@ export default defineConfig({
     ],
     web_accessible_resources: [
       {
+        resources: ['content-scripts/chart-markers-frame.js'],
+        matches: ['*://gmgn.ai/*', '*://*.gmgn.ai/*'],
+      },
+      {
         resources: ['sounds/*.mp3'],
         matches: [
           '*://axiom.trade/*',

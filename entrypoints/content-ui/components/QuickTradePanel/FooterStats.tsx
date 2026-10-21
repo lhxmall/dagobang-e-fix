@@ -11,6 +11,7 @@ export type FooterHoldingStats = {
   totalSellUsd: number | null;
   totalProfitUsd: number | null;
   totalProfitPnl: number | null;
+  totalRealizedProfitUsd?: number | null;
   walletsCount?: number;
   updatedAt?: number | null;
 };

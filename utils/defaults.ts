@@ -587,6 +587,8 @@ export function defaultSettings(): Settings {
       newPoolMonitorEnabled: false,
       newCoinSniperEnabled: false,
       consoleLogsEnabled: false,
+      limitOrderChartLinesEnabled: true,
+      breakevenSellEnabled: false,
     },
     telegram: {
       enabled: false,

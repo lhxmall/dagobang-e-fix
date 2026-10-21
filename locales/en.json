@@ -202,6 +202,8 @@
       "newPoolMonitor": "New Pool Monitor",
       "newCoinSniper": "New Coin Sniper",
       "consoleLogs": "Console Logs",
+      "limitOrderChartLines": "Show limit orders on GMGN chart",
+      "breakevenSell": "Quick trade breakeven sell",
       "notification": "Notification",
       "language": "Language",
       "toastPosition": "Toast position",
@@ -1162,6 +1164,12 @@
     },
     "status": {
       "txSent": "Tx Sent"
+    },
+    "breakeven": {
+      "action": "Recover cost",
+      "actionWithPercent": "Recover cost {0}%",
+      "recovered": "Principal recovered",
+      "unavailable": "Position value cannot recover the remaining principal"
     },
     "section": {
       "buy": "Buy",

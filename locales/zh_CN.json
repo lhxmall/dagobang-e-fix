@@ -202,6 +202,8 @@
       "newPoolMonitor": "新池监控",
       "newCoinSniper": "新币狙击",
       "consoleLogs": "控制台日志",
+      "limitOrderChartLines": "GMGN K 线显示挂单线",
+      "breakevenSell": "快速交易一键回本",
       "notification": "通知",
       "language": "语言",
       "toastPosition": "Toast 弹出位置",
@@ -1183,6 +1185,12 @@
     },
     "status": {
       "txSent": "交易已发送"
+    },
+    "breakeven": {
+      "action": "一键回本",
+      "actionWithPercent": "一键回本 {0}%",
+      "recovered": "已回本",
+      "unavailable": "当前持仓价值不足以收回尚未回收的本金"
     },
     "section": {
       "buy": "买入",

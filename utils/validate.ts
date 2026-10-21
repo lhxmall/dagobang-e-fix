@@ -223,6 +223,12 @@ export function validateSettings(input: Settings): Settings | null {
   const consoleLogsEnabled = typeof (input as any)?.ui?.consoleLogsEnabled === 'boolean'
     ? (input as any).ui.consoleLogsEnabled
     : ((defaults as any)?.ui?.consoleLogsEnabled ?? false);
+  const limitOrderChartLinesEnabled = typeof (input as any)?.ui?.limitOrderChartLinesEnabled === 'boolean'
+    ? (input as any).ui.limitOrderChartLinesEnabled
+    : ((defaults as any)?.ui?.limitOrderChartLinesEnabled ?? true);
+  const breakevenSellEnabled = typeof (input as any)?.ui?.breakevenSellEnabled === 'boolean'
+    ? (input as any).ui.breakevenSellEnabled
+    : ((defaults as any)?.ui?.breakevenSellEnabled ?? false);
   const tradeSuccessSoundEnabled = typeof (input as any).tradeSuccessSoundEnabled === 'boolean'
     ? (input as any).tradeSuccessSoundEnabled
     : ((defaults as any).tradeSuccessSoundEnabled ?? false);
@@ -964,6 +970,8 @@ export function validateSettings(input: Settings): Settings | null {
       newPoolMonitorEnabled,
       newCoinSniperEnabled,
       consoleLogsEnabled,
+      limitOrderChartLinesEnabled,
+      breakevenSellEnabled,
     },
     telegram: {
       enabled: telegramEnabled,

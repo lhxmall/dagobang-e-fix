@@ -62,6 +62,10 @@ export type SellSectionProps = {
   onTransfer?: (pct: number, toAddress: ChainAddress) => void;
   transferRecipients?: TransferRecipientOption[];
   defaultTransferRecipient?: ChainAddress | null;
+  breakevenEnabled?: boolean;
+  breakevenPercent?: number | null;
+  breakevenRecovered?: boolean;
+  onBreakevenSell?: () => void;
 };
 
 export function SellSection({
@@ -106,6 +110,10 @@ export function SellSection({
   onTransfer,
   transferRecipients = [],
   defaultTransferRecipient = null,
+  breakevenEnabled = false,
+  breakevenPercent = null,
+  breakevenRecovered = false,
+  onBreakevenSell,
 }: SellSectionProps) {
   const chainId = settings?.chainId ?? ChainId.BNB;
   const transferRecipientStorageKey = `dagobang_quick_transfer_recipient_v1:${chainId}`;
@@ -410,9 +418,32 @@ export function SellSection({
               ≈ {formatUsd(activePreviewUsd)}
             </span>
           </div>
-          {!isTransferTab ? (
-            <RoutePreviewHint label={previewRouteLabel} hops={previewRouteHops} loading={previewRouteLoading} tone="sell" locale={locale} />
-          ) : null}
+          <div className="flex shrink-0 items-center gap-2">
+            {!isTransferTab && breakevenEnabled ? (
+              <button
+                type="button"
+                className="max-w-[132px] truncate text-[11px] font-semibold text-amber-400 hover:text-amber-200 disabled:cursor-not-allowed disabled:text-zinc-600"
+                disabled={sellDisabled || (!breakevenRecovered && breakevenPercent == null)}
+                title={
+                  breakevenRecovered
+                    ? t('contentUi.breakeven.recovered', locale)
+                    : breakevenPercent != null
+                      ? t('contentUi.breakeven.actionWithPercent', locale, [breakevenPercent.toFixed(2)])
+                      : t('contentUi.breakeven.unavailable', locale)
+                }
+                onClick={() => onBreakevenSell?.()}
+              >
+                {breakevenRecovered
+                  ? t('contentUi.breakeven.recovered', locale)
+                  : breakevenPercent != null
+                    ? t('contentUi.breakeven.actionWithPercent', locale, [breakevenPercent.toFixed(2)])
+                    : t('contentUi.breakeven.action', locale)}
+              </button>
+            ) : null}
+            {!isTransferTab ? (
+              <RoutePreviewHint label={previewRouteLabel} hops={previewRouteHops} loading={previewRouteLoading} tone="sell" locale={locale} />
+            ) : null}
+          </div>
           {isTransferTab ? (
             <div className="min-w-0 text-right text-sky-300/85">
               {transferRecipients.length > 0 ? (

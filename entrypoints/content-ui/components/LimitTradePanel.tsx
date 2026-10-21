@@ -1,5 +1,5 @@
 import { browser } from 'wxt/browser';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { parseUnits, formatUnits, zeroAddress } from 'viem';
 import { Wallet, PanelRightOpen, PanelRightClose, ChevronUpSquare, ChevronDownSquare, X } from 'lucide-react';
 import type { Account, Settings, LimitOrder, LimitOrderCreateInput, LimitOrderScanStatus, LimitOrderType } from '@/types/extention';
@@ -18,6 +18,10 @@ import { USDC, USDT } from '@/constants/tokens/chains/common';
 import { bscTokens } from '@/constants/tokens/chains/bsc';
 import type { ChainAddress } from '@/types/chain/address';
 import { normalizeAddressKey } from '@/services/xSniper/engine/metrics';
+import {
+  publishGmgnLimitOrderChartMarkers,
+  resolveLiveSpotPriceUsd,
+} from '@/services/chartMarkers/publishLimitOrderChartMarkers';
 
 const normalizeWalletAddr = (addr?: string | null): ChainAddress | null => {
   const raw = typeof addr === 'string' ? addr.trim() : '';
@@ -459,12 +463,31 @@ export function LimitTradePanel({
   }, [panelWidth]);
 
   useEffect(() => {
+    if (!visible || siteInfo?.platform !== 'gmgn' || !tokenAddress || !siteInfo?.chain) return;
+    const timer = window.setTimeout(() => pushGmgnChartMarkers(orders), 80);
+    return () => window.clearTimeout(timer);
+  }, [visible, orders, tokenAddress, siteInfo, tokenInfo, scanPriceByTokenKey, pushGmgnChartMarkers]);
+
+  useEffect(() => {
     buyPriceRef.current = buyPrice;
   }, [buyPrice]);
 
   useEffect(() => {
     sellPriceRef.current = sellPrice;
   }, [sellPrice]);
+
+  const pushGmgnChartMarkers = useCallback((orderList: LimitOrder[]) => {
+    if (siteInfo?.platform !== 'gmgn' || !tokenAddress || !siteInfo?.chain) return;
+    const key = toTokenKey(chainId, tokenAddress);
+    const spot = scanPriceByTokenKey[key]?.priceUsd ?? resolveLiveSpotPriceUsd({ tokenInfo });
+    publishGmgnLimitOrderChartMarkers({
+      chainName: siteInfo.chain,
+      tokenAddress,
+      orders: orderList,
+      currentPriceUsd: spot,
+      liveTokenInfo: tokenInfo,
+    });
+  }, [chainId, scanPriceByTokenKey, siteInfo, tokenAddress, tokenInfo]);
 
   const refreshOrders = async () => {
     if (!settings) return;
@@ -473,6 +496,9 @@ export function LimitTradePanel({
       : ({ type: 'limitOrder:list', chainId } as const);
     const res = await call(req);
     setOrders(res.orders);
+    if (siteInfo?.platform === 'gmgn' && tokenAddress && siteInfo?.chain) {
+      pushGmgnChartMarkers(res.orders);
+    }
   };
   const refreshScanStatus = async () => {
     if (!settings) return;
