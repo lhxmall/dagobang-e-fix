@@ -1,8 +1,10 @@
-import { useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useMemo, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import toast from 'react-hot-toast';
 import type { Account, QuickBuyPresetOverride, QuickTradeRouteHop, Settings } from '@/types/extention';
 import type { ChainAddress } from '@/types/chain/address';
 import type { SiteInfo } from '@/utils/sites';
-import type { Locale } from '@/utils/i18n';
+import { t, type Locale } from '@/utils/i18n';
+import { computeBreakevenSellPercent, computeBreakevenTargetUsd } from '@/services/trade/breakevenSell';
 import { Header } from './Header';
 import { BuySection } from './BuySection';
 import { SellSection, type SellSectionProps } from './SellSection';
@@ -236,6 +238,38 @@ export function QuickTradePanel({
     }
     return transferRecipients[0]?.address ?? null;
   })();
+  const breakevenUiEnabled = settings?.ui?.breakevenSellEnabled === true;
+  const breakevenTargetUsd = useMemo(
+    () => computeBreakevenTargetUsd(holdingStats?.currentBuyUsd, holdingStats?.totalRealizedProfitUsd),
+    [holdingStats?.currentBuyUsd, holdingStats?.totalRealizedProfitUsd],
+  );
+  const breakevenRecovered = breakevenUiEnabled && breakevenTargetUsd <= 0
+    && (holdingStats?.currentBuyUsd ?? 0) > 0;
+  const breakevenPercent = useMemo(() => {
+    if (!breakevenUiEnabled || breakevenRecovered) return null;
+    if (!(breakevenTargetUsd > 0)) return null;
+    const chainId = settings?.chainId ?? 56;
+    const slippageBps = settings?.chains[chainId]?.slippageBps ?? 4000;
+    return computeBreakevenSellPercent({
+      targetUsd: breakevenTargetUsd,
+      tokenBalanceAmount,
+      tokenPriceUsd,
+      slippageBps,
+    });
+  }, [breakevenRecovered, breakevenTargetUsd, breakevenUiEnabled, settings, tokenBalanceAmount, tokenPriceUsd]);
+
+  const handleBreakevenSell = () => {
+    if (breakevenRecovered) {
+      toast.success(t('contentUi.breakeven.recovered', locale));
+      return;
+    }
+    if (breakevenPercent == null) {
+      toast.error(t('contentUi.breakeven.unavailable', locale));
+      return;
+    }
+    onSell(breakevenPercent);
+  };
+
   const sellSectionProps: SellSectionProps = {
     formattedTokenBalance,
     tokenBalanceAmount,
@@ -278,6 +312,10 @@ export function QuickTradePanel({
     onTransfer,
     transferRecipients,
     defaultTransferRecipient,
+    breakevenEnabled: breakevenUiEnabled,
+    breakevenPercent,
+    breakevenRecovered,
+    onBreakevenSell: handleBreakevenSell,
   };
   const handleToggleWalletSelector = () => {
     setWalletSelectorOpen((prev) => {

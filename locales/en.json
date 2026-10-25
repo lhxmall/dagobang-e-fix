@@ -202,6 +202,8 @@
       "newPoolMonitor": "New Pool Monitor",
       "newCoinSniper": "New Coin Sniper",
       "consoleLogs": "Console Logs",
+      "limitOrderChartLines": "Show limit orders on GMGN chart",
+      "breakevenSell": "Quick trade breakeven sell",
       "notification": "Notification",
       "language": "Language",
       "toastPosition": "Toast position",
@@ -1128,7 +1130,8 @@
         "maximize": "Maximize",
         "input": "Input",
         "analysis": "Analysis",
-        "summary": "Lessons"
+        "summary": "Lessons",
+        "exportJson": "Export JSON"
       },
       "sync": {
         "title": "Supabase",
@@ -1151,6 +1154,9 @@
         "autofillFailed": "Autofill failed",
         "savedCloud": "Saved to Supabase",
         "savedLocal": "Saved to local cache",
+        "exportSuccess": "Exported {0} reviews",
+        "exportEmpty": "Nothing to export",
+        "exportFailed": "Export failed",
         "saveFailed": "Save failed",
         "deleted": "Deleted",
         "deleteFailed": "Delete failed"
@@ -1158,6 +1164,12 @@
     },
     "status": {
       "txSent": "Tx Sent"
+    },
+    "breakeven": {
+      "action": "Recover cost",
+      "actionWithPercent": "Recover cost {0}%",
+      "recovered": "Principal recovered",
+      "unavailable": "Position value cannot recover the remaining principal"
     },
     "section": {
       "buy": "Buy",

@@ -11,6 +11,8 @@ export function SwitchSettings({ settingsDraft, setSettingsDraft, tt }: SwitchSe
   const newPoolMonitorEnabled = settingsDraft.ui?.newPoolMonitorEnabled ?? false;
   const newCoinSniperEnabled = settingsDraft.ui?.newCoinSniperEnabled ?? false;
   const consoleLogsEnabled = settingsDraft.ui?.consoleLogsEnabled ?? false;
+  const limitOrderChartLinesEnabled = settingsDraft.ui?.limitOrderChartLinesEnabled ?? true;
+  const breakevenSellEnabled = settingsDraft.ui?.breakevenSellEnabled ?? false;
 
   const updateUi = (patch: Partial<NonNullable<typeof settingsDraft.ui>>) =>
     setSettingsDraft((s) => ({
@@ -24,6 +26,8 @@ export function SwitchSettings({ settingsDraft, setSettingsDraft, tt }: SwitchSe
         newPoolMonitorEnabled: s.ui?.newPoolMonitorEnabled ?? false,
         newCoinSniperEnabled: s.ui?.newCoinSniperEnabled ?? false,
         consoleLogsEnabled: s.ui?.consoleLogsEnabled ?? false,
+        limitOrderChartLinesEnabled: s.ui?.limitOrderChartLinesEnabled ?? true,
+        breakevenSellEnabled: s.ui?.breakevenSellEnabled ?? false,
         ...patch,
       },
     }));
@@ -102,6 +106,24 @@ export function SwitchSettings({ settingsDraft, setSettingsDraft, tt }: SwitchSe
             type="checkbox"
             checked={consoleLogsEnabled}
             onChange={(e) => updateUi({ consoleLogsEnabled: e.target.checked })}
+          />
+        </label>
+
+        <label className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
+          <div className="text-[14px] text-zinc-300">{tt('popup.settings.limitOrderChartLines')}</div>
+          <input
+            type="checkbox"
+            checked={limitOrderChartLinesEnabled}
+            onChange={(e) => updateUi({ limitOrderChartLinesEnabled: e.target.checked })}
+          />
+        </label>
+
+        <label className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
+          <div className="text-[14px] text-zinc-300">{tt('popup.settings.breakevenSell')}</div>
+          <input
+            type="checkbox"
+            checked={breakevenSellEnabled}
+            onChange={(e) => updateUi({ breakevenSellEnabled: e.target.checked })}
           />
         </label>
       </div>

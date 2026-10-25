@@ -202,6 +202,8 @@
       "newPoolMonitor": "新池監控",
       "newCoinSniper": "新幣狙擊",
       "consoleLogs": "控制台日誌",
+      "limitOrderChartLines": "GMGN K 線顯示掛單線",
+      "breakevenSell": "快速交易一鍵回本",
       "notification": "通知",
       "language": "語言",
       "toastPosition": "Toast 彈出位置",
@@ -1128,7 +1130,8 @@
         "maximize": "最大化",
         "input": "輸入",
         "analysis": "分析",
-        "summary": "總結"
+        "summary": "總結",
+        "exportJson": "匯出 JSON"
       },
       "sync": {
         "title": "Supabase",
@@ -1151,6 +1154,9 @@
         "autofillFailed": "自動填充失敗",
         "savedCloud": "已同步到 Supabase",
         "savedLocal": "已儲存到本地快取",
+        "exportSuccess": "已匯出 {0} 條復盤",
+        "exportEmpty": "沒有可匯出的復盤",
+        "exportFailed": "匯出失敗",
         "saveFailed": "儲存失敗",
         "deleted": "刪除成功",
         "deleteFailed": "刪除失敗"
@@ -1158,6 +1164,12 @@
     },
     "status": {
       "txSent": "交易已送出"
+    },
+    "breakeven": {
+      "action": "一鍵回本",
+      "actionWithPercent": "一鍵回本 {0}%",
+      "recovered": "已回本",
+      "unavailable": "當前持倉價值不足以收回尚未回收的本金"
     },
     "section": {
       "buy": "買入",

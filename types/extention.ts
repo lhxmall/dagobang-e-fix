@@ -355,6 +355,10 @@ export type SwitchSettings = {
   newPoolMonitorEnabled?: boolean;
   newCoinSniperEnabled?: boolean;
   consoleLogsEnabled?: boolean;
+  /** GMGN K-line dashed lines for open limit orders (default on). */
+  limitOrderChartLinesEnabled?: boolean;
+  /** Quick trade panel one-click breakeven sell (default off). */
+  breakevenSellEnabled?: boolean;
 };
 
 export type TelegramSettings = {
